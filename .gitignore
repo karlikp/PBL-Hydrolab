@@ -1,0 +1,25 @@
+# Środowiska Wirtualne Pythona
+venv/
+.venv/
+env/
+
+# Zapisane Pliki Pythona
+__pycache__/
+*.pyc
+
+# Pliki logów
+*.log
+
+# Dane, które generujesz
+*.sqlite
+*.db
+
+# Narzędzia IDE i systemowe (VS Code)
+.vscode/
+.idea/
+.DS_Store
+
+# Pakiety Pythona (instalowane z pip)
+.Python
+build/
+dist/

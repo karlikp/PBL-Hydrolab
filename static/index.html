@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <title>Panel Operatora Drona - Jakość Wody</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+    
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f0f2f5; }
+        h1 { color: #1a1a1a; text-align: center; margin-bottom: 20px; }
+        
+        #controls { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 20px; text-align: center; }
+        .filter-group { display: inline-block; margin: 0 15px; text-align: left; }
+        .filter-group label { display: block; font-size: 0.85em; color: #666; margin-bottom: 5px; font-weight: bold; }
+        
+        input.datetime-input { 
+            padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; width: 180px; background-color: #fff; cursor: pointer;
+        }
+
+        #stats-container { display: flex; justify-content: space-between; gap: 15px; margin-bottom: 20px; }
+        .stat-card { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); flex: 1; text-align: center; border-top: 4px solid #007bff; }
+        .stat-card h4 { margin: 0 0 10px 0; color: #555; font-size: 0.9em; text-transform: uppercase; }
+        .stat-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px; }
+        .stat-item { font-size: 0.85em; }
+        .stat-label { color: #888; display: block; }
+        .stat-value { font-weight: bold; color: #1a1a1a; font-size: 1.1em; }
+        
+        /* Kolory kafelków */
+        .color-ph { border-top-color: #4bc0c0; }     /* Turkus */
+        .color-oxy { border-top-color: #36a2eb; }    /* Niebieski - NOWY */
+        .color-temp { border-top-color: #ff6384; }   /* Czerwony */
+        .color-cond { border-top-color: #ffce56; }   /* Żółty */
+
+        /* Zwiększona wysokość kontenera, żeby pomieścić 4 wykresy */
+        #visualization-container { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 20px; height: 800px; }
+        #map-container { height: 100%; width: 48%; border-radius: 12px; border: 1px solid #ddd; background: white; z-index: 1; }
+        #chart-container { width: 48%; display: flex; flex-direction: column; gap: 15px; overflow-y: auto; padding-right: 10px; }
+        .chart-box { min-height: 250px; background: white; border-radius: 12px; border: 1px solid #ddd; padding: 15px; flex-shrink: 0; }
+        canvas { cursor: crosshair; }
+
+        #data-container { background: white; border: 1px solid #ddd; padding: 20px; border-radius: 12px; max-height: 300px; overflow-y: auto; }
+        .reading-item { border-bottom: 1px solid #eee; padding: 12px 0; font-size: 0.9em; }
+        
+        button { padding: 10px 20px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 6px; font-weight: 600; transition: 0.2s; }
+        button:hover { background: #0056b3; }
+        .btn-secondary { background: #6c757d; margin-left: 5px; }
+        .btn-warning { background: #fd7e14; margin-left: 5px; }
+        
+        .export-group { margin-top: 15px; border-top: 1px solid #eee; padding-top: 15px; }
+        .btn-export { background: #28a745; margin: 0 5px; }
+        .btn-export:hover { background: #218838; }
+    </style>
+</head>
+<body>
+    <h1>Monitor Jakości Wody</h1>
+    
+    <div id="controls">
+        <div class="filter-group">
+            <label>Od (Początek):</label>
+            <input type="text" id="time-start" class="datetime-input" placeholder="Wybierz datę i czas">
+        </div>
+        <div class="filter-group">
+            <label>Do (Koniec):</label>
+            <input type="text" id="time-end" class="datetime-input" placeholder="Wybierz datę i czas">
+        </div>
+        <button onclick="fetchData()">Filtruj Dane</button>
+        <button onclick="resetFilters()" class="btn-secondary">Reset filtra</button>
+        <button onclick="resetZoom()" class="btn-warning">Domyślny widok wykresu</button>
+
+        <div class="export-group">
+            <button onclick="downloadCSV()" class="btn-export">Pobierz CSV (Excel)</button>
+            <button onclick="exportChartsToImage()" class="btn-export">Zapisz wykresy jako obraz</button>
+        </div>
+    </div>
+
+    <div id="stats-container">
+        <div class="stat-card color-ph">
+            <h4>Statystyki pH</h4>
+            <div class="stat-grid">
+                <div class="stat-item"><span class="stat-label">Min</span><span class="stat-value" id="ph-min">-</span></div>
+                <div class="stat-item"><span class="stat-label">Śr</span><span class="stat-value" id="ph-avg">-</span></div>
+                <div class="stat-item"><span class="stat-label">Max</span><span class="stat-value" id="ph-max">-</span></div>
+            </div>
+        </div>
+        <div class="stat-card color-oxy">
+            <h4>Tlen (mg/L)</h4>
+            <div class="stat-grid">
+                <div class="stat-item"><span class="stat-label">Min</span><span class="stat-value" id="oxy-min">-</span></div>
+                <div class="stat-item"><span class="stat-label">Śr</span><span class="stat-value" id="oxy-avg">-</span></div>
+                <div class="stat-item"><span class="stat-label">Max</span><span class="stat-value" id="oxy-max">-</span></div>
+            </div>
+        </div>
+        <div class="stat-card color-temp">
+            <h4>Temperatura (°C)</h4>
+            <div class="stat-grid">
+                <div class="stat-item"><span class="stat-label">Min</span><span class="stat-value" id="temp-min">-</span></div>
+                <div class="stat-item"><span class="stat-label">Śr</span><span class="stat-value" id="temp-avg">-</span></div>
+                <div class="stat-item"><span class="stat-label">Max</span><span class="stat-value" id="temp-max">-</span></div>
+            </div>
+        </div>
+        <div class="stat-card color-cond">
+            <h4>Przewodność (µS)</h4>
+            <div class="stat-grid">
+                <div class="stat-item"><span class="stat-label">Min</span><span class="stat-value" id="cond-min">-</span></div>
+                <div class="stat-item"><span class="stat-label">Śr</span><span class="stat-value" id="cond-avg">-</span></div>
+                <div class="stat-item"><span class="stat-label">Max</span><span class="stat-value" id="cond-max">-</span></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="visualization-container">
+        <div id="map-container">Mapa ładowanie...</div>
+        <div id="chart-container">
+            <div class="chart-box"><canvas id="phChart"></canvas></div>
+            <div class="chart-box"><canvas id="oxyChart"></canvas></div>
+            <div class="chart-box"><canvas id="tempChart"></canvas></div>
+            <div class="chart-box"><canvas id="condChart"></canvas></div>
+        </div>
+    </div>
+    
+    <div id="data-container">Ładowanie pomiarów...</div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script> 
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom"></script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+    <script src="https://npmcdn.com/flatpickr/dist/l10n/pl.js"></script>
+
+    <script>        
+        const API_URL = 'http://127.0.0.1:8000/api/data/all_readings';
+        // Dodano oxygenChartInstance
+        let mymap = null, phChartInstance = null, oxyChartInstance = null, tempChartInstance = null, condChartInstance = null;
+        let startPicker, endPicker, mapMarkers = [];
+        let lastFilteredReadings = [];
+
+        const formatPL = (d) => new Date(d).toLocaleString('pl-PL', {
+            day: '2-digit', month: '2-digit', year: 'numeric',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+        });
+
+        function downloadCSV() {
+            if (lastFilteredReadings.length === 0) { alert("Brak danych!"); return; }
+            let csvContent = "\uFEFF"; // BOM dla Excela
+            // Dodano nagłówek Tlen
+            csvContent += "Data;Szerokość;Długość;pH;Tlen;Temperatura;Przewodność\n";
+
+            lastFilteredReadings.forEach(r => {
+                const fix = (val) => (val !== undefined && val !== null) ? val.toString().replace(".", ",") : "0";
+                // Dodano r.oxygen
+                csvContent += `${formatPL(r.time)};${fix(r.lat)};${fix(r.lon)};${fix(r.ph)};${fix(r.oxygen)};${fix(r.temp)};${fix(r.cond)}\n`;
+            });
+
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = `pomiary_${new Date().toISOString().slice(0,10)}.csv`;
+            link.click();
+        }
+
+        function exportChartsToImage() {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            // Pobieramy 4 wykresy
+            const charts = [
+                document.getElementById('phChart'), 
+                document.getElementById('oxyChart'), 
+                document.getElementById('tempChart'), 
+                document.getElementById('condChart')
+            ];
+            
+            canvas.width = charts[0].width;
+            canvas.height = charts[0].height * charts.length;
+
+            ctx.fillStyle = "white";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            charts.forEach((chart, i) => {
+                ctx.drawImage(chart, 0, i * chart.height);
+            });
+
+            const link = document.createElement('a');
+            link.download = 'raport_wykresy.png';
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        }
+
+        function calculateTrendLine(data) {
+            if (!data || data.length < 2) return [];
+            const n = data.length;
+            let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+            for(let i=0; i<n; i++) { sumX += i; sumY += data[i]; sumXY += i * data[i]; sumX2 += i * i; }
+            const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+            const intercept = (sumY - slope * sumX) / n;
+            return data.map((_, i) => slope * i + intercept);
+        }
+
+        function updateStatistics(data) {
+            if (data.length === 0) return;
+            const calc = (arr) => {
+                const valid = arr.filter(v => v !== null && v !== undefined);
+                if (valid.length === 0) return { min: '-', max: '-', avg: '-' };
+                const min = Math.min(...valid);
+                const max = Math.max(...valid);
+                const avg = valid.reduce((a, b) => a + b, 0) / valid.length;
+                return { min: min.toFixed(2), max: max.toFixed(2), avg: avg.toFixed(2) };
+            };
+
+            const ph = calc(data.map(r => r.ph));
+            const oxy = calc(data.map(r => r.oxygen)); // Obliczanie statystyk Tlenu
+            const temp = calc(data.map(r => r.temp));
+            const cond = calc(data.map(r => r.cond));
+            
+            document.getElementById('ph-min').innerText = ph.min; document.getElementById('ph-avg').innerText = ph.avg; document.getElementById('ph-max').innerText = ph.max;
+            // Wypełnianie DOM dla Tlenu
+            document.getElementById('oxy-min').innerText = oxy.min; document.getElementById('oxy-avg').innerText = oxy.avg; document.getElementById('oxy-max').innerText = oxy.max;
+            
+            document.getElementById('temp-min').innerText = temp.min; document.getElementById('temp-avg').innerText = temp.avg; document.getElementById('temp-max').innerText = temp.max;
+            document.getElementById('cond-min').innerText = cond.min; document.getElementById('cond-avg').innerText = cond.avg; document.getElementById('cond-max').innerText = cond.max;
+        }
+
+        const crosshairPlugin = {
+            id: 'crosshair',
+            afterDatasetsDraw(chart) {
+                const { ctx, tooltip, chartArea: { top, bottom } } = chart;
+                if (tooltip && tooltip.getActiveElements().length) {
+                    const x = tooltip.getActiveElements()[0].element.x;
+                    ctx.save(); ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom);
+                    ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(0, 0, 0, 0.4)';
+                    ctx.setLineDash([5, 5]); ctx.stroke(); ctx.restore();
+                }
+            }
+        };
+
+        function initApp() {
+            startPicker = flatpickr("#time-start", { enableTime: true, time_24hr: true, dateFormat: "d.m.Y H:i", locale: "pl" });
+            endPicker = flatpickr("#time-end", { enableTime: true, time_24hr: true, dateFormat: "d.m.Y H:i", locale: "pl" });
+            mymap = L.map('map-container').setView([52.0, 19.0], 6); 
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mymap);
+        }
+
+        function updateMap(readings) {
+            mymap.eachLayer(layer => { if (layer instanceof L.Marker) mymap.removeLayer(layer); });
+            mapMarkers = readings.map(r => L.marker([r.lat, r.lon]).addTo(mymap).bindPopup(
+                `<b>${formatPL(r.time)}</b><br>pH: ${r.ph}<br>Tlen: ${r.oxygen}`
+            ));
+            if (readings.length > 0) mymap.fitBounds(readings.map(r => [r.lat, r.lon]), { padding: [40, 40] });
+        }
+
+        function updateCharts(readings) {
+            const start = startPicker.selectedDates[0], end = endPicker.selectedDates[0];
+            let filtered = readings;
+            if (start || end) {
+                filtered = readings.filter(r => {
+                    const t = new Date(r.time).getTime();
+                    return (!start || t >= start.getTime()) && (!end || t <= end.getTime());
+                });
+            } else { filtered = readings.slice(-25); }
+
+            lastFilteredReadings = filtered;
+            updateMap(filtered);
+            updateStatistics(filtered);
+
+            const labels = filtered.map(r => new Date(r.time).toLocaleTimeString('pl-PL', { hour12: false }));
+            const sharedOptions = {
+                responsive: true, maintainAspectRatio: false, animation: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: { zoom: { pan: { enabled: true, mode: 'x' }, zoom: { wheel: { enabled: true }, mode: 'x' } } },
+                onHover: (e, el) => {
+                    if (el.length > 0) {
+                        const i = el[0].index;
+                        // Synchronizacja wszystkich 4 wykresów
+                        [phChartInstance, oxyChartInstance, tempChartInstance, condChartInstance].forEach(c => {
+                            if (c && c !== e.chart) { 
+                                c.setActiveElements([{ datasetIndex: 0, index: i }]); 
+                                c.tooltip.setActiveElements([{ datasetIndex: 0, index: i }]); 
+                                c.update('none'); 
+                            }
+                        });
+                        if (mapMarkers[i]) mapMarkers[i].openPopup();
+                    }
+                }
+            };
+
+            const upd = (ins, id, lbl, dat, trd, col) => {
+                const dts = [{ label: lbl, data: dat, borderColor: col, backgroundColor: col + '1A', fill: true, tension: 0.3 }, { label: 'Trend', data: trd, borderColor: col + '80', borderDash: [5, 5], pointRadius: 0, fill: false }];
+                if (ins) { ins.data.labels = labels; ins.data.datasets[0].data = dat; ins.data.datasets[1].data = trd; ins.update('none'); return ins; }
+                return new Chart(document.getElementById(id), { type: 'line', data: { labels, datasets: dts }, options: sharedOptions, plugins: [crosshairPlugin] });
+            };
+
+            phChartInstance = upd(phChartInstance, 'phChart', 'pH', filtered.map(r => r.ph), calculateTrendLine(filtered.map(r => r.ph)), '#4bc0c0');
+            // NOWY WYKRES: Tlen (kolor niebieski)
+            oxyChartInstance = upd(oxyChartInstance, 'oxyChart', 'Tlen', filtered.map(r => r.oxygen), calculateTrendLine(filtered.map(r => r.oxygen)), '#36a2eb');
+            tempChartInstance = upd(tempChartInstance, 'tempChart', 'Temp', filtered.map(r => r.temp), calculateTrendLine(filtered.map(r => r.temp)), '#ff6384');
+            condChartInstance = upd(condChartInstance, 'condChart', 'Cond', filtered.map(r => r.cond), calculateTrendLine(filtered.map(r => r.cond)), '#ffce56');
+        }
+
+        async function fetchData() {
+            try {
+                const res = await fetch(API_URL);
+                const data = await res.json();
+                const readings = data.readings.sort((a,b) => new Date(a.time) - new Date(b.time));
+                updateCharts(readings);
+                // Lista danych z Tlenem
+                document.getElementById('data-container').innerHTML = `<h3>Historia (${readings.length})</h3>` + readings.slice().reverse().map(r => 
+                    `<div class="reading-item"><strong>${formatPL(r.time)}</strong> | pH: ${r.ph} | O2: ${r.oxygen} | T: ${r.temp}C | C: ${r.cond}</div>`
+                ).join('');
+            } catch (e) { console.error(e); }
+        }
+
+        function resetFilters() { startPicker.clear(); endPicker.clear(); fetchData(); }
+        // Reset zoomu dla 4 wykresów
+        function resetZoom() { [phChartInstance, oxyChartInstance, tempChartInstance, condChartInstance].forEach(c => c && c.resetZoom()); }
+
+        document.addEventListener('DOMContentLoaded', () => { initApp(); fetchData(); setInterval(() => { if (!startPicker.selectedDates[0] && !endPicker.selectedDates[0]) fetchData(); }, 5000); });
+    </script>
+</body>
+</html>
