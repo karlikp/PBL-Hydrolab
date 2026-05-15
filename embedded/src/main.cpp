@@ -14,9 +14,10 @@
 #include <Arduino.h>
 
 #include "Clock.h"
-#include "MissionControl.h"
 #include "FrameCodec.h"
+#include "MissionControl.h"
 #include "RadioLink.h"
+#include "Telemetry.h"
 
 namespace {
 
@@ -26,9 +27,10 @@ constexpr const char* FIRMWARE_VERSION = "0.1.0-skeleton";
 // note for the production wiring change.
 constexpr uint32_t LINK_BAUD = 115200;
 
-RealClock        g_clock;
-RadioLink        g_radio(Serial);
+RealClock       g_clock;
+RadioLink       g_radio(Serial);
 MissionControl  g_controller(g_clock, g_radio);
+Telemetry       g_telemetry(g_clock, g_radio);
 
 void on_frame(void* /*ctx*/, frame::Type type,
               const char* payload, size_t payload_len) {
@@ -52,5 +54,6 @@ void setup() {
 void loop() {
     g_radio.tick();
     g_controller.tick();
+    g_telemetry.tick();
     delay(5);
 }

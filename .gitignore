@@ -23,3 +23,8 @@ __pycache__/
 .Python
 build/
 dist/
+
+# PlatformIO (embedded build cache)
+.pio/
+.pioenvs/
+.piolibdeps/

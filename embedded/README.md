@@ -118,15 +118,12 @@ Every command and reply is a properly-checksummed protocol frame. See
 | MissionControl   | Real — full state machine + CMD dispatch      | No change                         |
 | Sampler          | Real FSM, **timer-driven step transitions**   | Step transitions become sensor-driven (`SUBx`, `TOPCNx`, `LIMx`); pump/winch actuation calls land in `enter_step()` |
 | Clock            | Real (`millis()`)                             | No change                         |
-| Elmetron, GPS    | Not wired yet                                 | New modules; their state events flow through the same protocol |
+| Telemetry        | Real broadcast path, **zeroed sample data**   | `Telemetry::update(Sample)` called by sensor + GPS modules with real readings; broadcast path unchanged |
+| Elmetron, GPS    | Not wired yet                                 | New modules emit STATE/STEP/ERROR events via the same protocol; data flows into Telemetry::update() |
 
-The legacy files in `src/` and `include/` (`SensorManager.cpp`,
-`GPSManager.cpp`, `motor_control.cpp`, `pid_ctr.cpp`) are from the
-previous semester. They compile but are not referenced by the skeleton.
-They'll be re-integrated module-by-module as real hardware drivers
-arrive — keep them around for now as reference implementations of the
-Elmetron protocol, u-blox GNSS wrapper, MCPWM motor driver, and PID
-control loop.
+Reference implementations from the previous semester live in `legacy/`
+(separate tree, not compiled). See `legacy/README.md` for what's in
+there and how to fold each module back in.
 
 ## Skeleton scope and known limitations
 
@@ -134,9 +131,10 @@ control loop.
   Serial port handles both incoming CMDs and outgoing TLM/EVT. When the
   RFD module is wired up, swap to a dedicated UART (`Serial1` or
   `Serial2`) at 57600 baud — see the note at the top of `main.cpp`.
-- **No TLM emission yet.** The skeleton focuses on CMD ↔ EVT round-trip
-  validation. TLM broadcasts (the 2 Hz environmental telemetry) come
-  back online once `SensorManager` and `GPSManager` are re-integrated.
+- **TLM carries zeros until sensors land.** The 2 Hz TLM broadcast is
+  wired up and continuously firing; sensor and GPS fields are zeroed,
+  which the GCS already interprets as "sensor not ready" per the
+  protocol. The path is real — only the data source is a stub.
 - **Single writer, no mutex.** The main loop is the only producer of
   outgoing frames today. When tasks land that emit frames concurrently
   (e.g. a FreeRTOS sensor task), wrap `RadioLink::send()` in a mutex to
