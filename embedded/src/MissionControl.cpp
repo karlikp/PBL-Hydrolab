@@ -2,7 +2,9 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <Arduino.h>
 
+#include "BatteryMonitor.h"
 #include "RadioLink.h"
 #include "Clock.h"
 
@@ -76,7 +78,31 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
     else if (matches("RESET_C3"))       cmd_reset_tank(2, verb);
     else if (matches("STATUS"))         cmd_status(verb);
     else if (matches("PING"))           cmd_ping(verb);
+    else if (matches("ADC_SCAN"))       cmd_adc_scan(verb);
     else                                 emit_nack(verb, "unknown_command");
+}
+
+// Diagnostic: read a handful of ADC1-capable GPIOs that aren't
+// dedicated to other peripherals, emit one event per pin so we can
+// spot which one tracks battery voltage. Used to pin down which GPIO
+// the board's SUPADC net actually lands on.
+void MissionControl::cmd_adc_scan(const char* verb) {
+    emit_ack(verb);
+    // Only scan pins that are NOT assigned to other peripherals in
+    // the connector PDF (so we don't disturb running drivers). GPIO 4
+    // is the power latch — also skipped.
+    const int candidates[] = { 1, 2, 3, 5 };
+    for (int pin : candidates) {
+        analogSetPinAttenuation(pin, ADC_11db);
+        pinMode(pin, INPUT);
+        delay(2);
+        const int raw = analogRead(pin);
+        const uint32_t mv = analogReadMilliVolts(pin);
+        char buf[80];
+        snprintf(buf, sizeof(buf), "EVT,SYS,ADC,IO%d/raw=%d/mv=%lu",
+                 pin, raw, static_cast<unsigned long>(mv));
+        send_payload(buf);
+    }
 }
 
 void MissionControl::cmd_start_tank(uint8_t idx, const char* verb) {
@@ -120,6 +146,14 @@ void MissionControl::cmd_status(const char* verb) {
     // Elmetron isn't implemented yet; report DOCKED placeholder so the
     // GCS has a complete snapshot to render.
     send_payload("EVT,ELMETRON,STATE,DOCKED");
+    if (battery_) {
+        char buf[80];
+        snprintf(buf, sizeof(buf), "EVT,SYS,BATTERY,%.2fV/raw=%u/mv=%lu",
+                 battery_->last_voltage(),
+                 battery_->last_raw(),
+                 static_cast<unsigned long>(battery_->last_mv()));
+        send_payload(buf);
+    }
 }
 
 void MissionControl::cmd_ping(const char* verb) {

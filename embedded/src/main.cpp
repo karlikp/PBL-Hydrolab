@@ -13,6 +13,7 @@
 
 #include <Arduino.h>
 
+#include "BatteryMonitor.h"
 #include "Clock.h"
 #include "FrameCodec.h"
 #include "MissionControl.h"
@@ -27,6 +28,9 @@ namespace {
 // powers off. setup() must do this BEFORE anything else.
 constexpr int POWER_LATCH_PIN = 4;
 
+// Battery voltage sense (divider on the schematic: R18 upper, R19 lower).
+constexpr int BATTERY_ADC_PIN = 5;
+
 constexpr const char* FIRMWARE_VERSION = "0.1.0-skeleton";
 
 // USB Serial @ 115200 during skeleton development. See top-of-file
@@ -37,6 +41,7 @@ RealClock       g_clock;
 RadioLink       g_radio(Serial);
 MissionControl  g_controller(g_clock, g_radio);
 Telemetry       g_telemetry(g_clock, g_radio);
+BatteryMonitor  g_battery(g_clock, g_radio, BATTERY_ADC_PIN, POWER_LATCH_PIN);
 
 void on_frame(void* /*ctx*/, frame::Type type,
               const char* payload, size_t payload_len) {
@@ -51,14 +56,21 @@ void on_frame(void* /*ctx*/, frame::Type type,
 }  // namespace
 
 void setup() {
-    // First action: latch power on. Do this before anything else can
-    // float GPIO 4 — otherwise the board self-powers-off mid-init.
+#ifdef BOARD_ESP32_S3
+    // First action on the production board: latch power on. Do this
+    // before anything else can float GPIO 4 — otherwise the board
+    // self-powers-off mid-init.
     pinMode(POWER_LATCH_PIN, OUTPUT);
     digitalWrite(POWER_LATCH_PIN, HIGH);
+#endif
 
     Serial.begin(LINK_BAUD);
     delay(200);  // brief settle so the BOOT event isn't lost on hot-attach
     g_radio.on_frame(on_frame, nullptr);
+#ifdef BOARD_ESP32_S3
+    g_battery.begin();
+    g_controller.set_battery_monitor(&g_battery);
+#endif
     g_controller.boot(FIRMWARE_VERSION);
 }
 
@@ -66,5 +78,8 @@ void loop() {
     g_radio.tick();
     g_controller.tick();
     g_telemetry.tick();
+#ifdef BOARD_ESP32_S3
+    g_battery.tick();
+#endif
     delay(5);
 }

@@ -23,6 +23,7 @@
 
 class Clock;
 class RadioLink;
+class BatteryMonitor;
 
 enum class SystemMode : uint8_t {
     IDLE,
@@ -50,12 +51,17 @@ public:
 
     SystemMode mode() const { return mode_; }
 
+    // Optional: attach the battery monitor so STATUS responses include
+    // current battery voltage. nullptr is fine (e.g. on classic env).
+    void set_battery_monitor(BatteryMonitor* bm) { battery_ = bm; }
+
 private:
     Clock&     clock_;
     RadioLink& radio_;
     SystemMode mode_ = SystemMode::IDLE;
     bool mode_changed_ = false;
     Sampler tanks_[3];
+    BatteryMonitor* battery_ = nullptr;
 
     // Command handlers
     void cmd_start_tank(uint8_t idx, const char* verb);
@@ -63,6 +69,7 @@ private:
     void cmd_reset_tank(uint8_t idx, const char* verb);
     void cmd_status(const char* verb);
     void cmd_ping(const char* verb);
+    void cmd_adc_scan(const char* verb);
 
     void set_mode(SystemMode m);
     bool any_tank_sampling() const;
