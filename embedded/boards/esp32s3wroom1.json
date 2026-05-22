@@ -1,0 +1,59 @@
+
+{
+	"build": {
+        "arduino": {
+            "ldscript": "esp32s3_out.ld",
+            "memory_type": "qio_opi",
+            "partitions": "default_8MB.csv"
+        },
+		"core": "esp32",
+		"cpu": "esp32s3",
+		"f_cpu": "240000000L",
+        "f_flash": "80000000L",
+		"mcu": "esp32s3",
+		"variant": "esp32s3",
+		"extra_flags": [
+			 "-DBOARD_HAS_PSRAM",
+            "-DARDUINO_USB_MODE=0",
+            "-DARDUINO_USB_CDC_ON_BOOT=1",
+            "-DARDUINO_RUNNING_CORE=1",
+            "-DARDUINO_EVENT_RUNNING_CORE=1",
+            "-DCONFIG_IDF_TARGET_ESP32S3"
+		],
+        "flash_mode": "qio",
+        "psram_type": "opi",
+        "hwids": [
+            [
+                "0x303A",
+                "0x1001"
+            ]
+        ]
+	},
+	"frameworks": [
+		"arduino",
+        "espidf"
+	],
+    "connectivity": [
+        "wifi",
+        "bluetooth"
+    ],
+	"name": "Espressif ESP32-S3 WROOM-1 (N8R8)",
+	"platform": "espressif32",
+	"upload": {
+		"protocol": "esptool",
+        "maximum_ram_size": 327680,
+		"speed": 921600,
+		"require_upload_port": true,
+		"maximum_size": 8388608,
+		"flash_size": "8MB"
+	},
+	"debug": {
+		"default_tool": "esp-builtin",
+        "onboard_tools": [
+        "esp-builtin"
+        ],
+        "openocd_target": "esp32s3.cfg"
+	},
+    "url": "https://www.espressif.com/en/products/modules/esp32-s3-wroom-1",
+    "vendor": "Espressif"
+}

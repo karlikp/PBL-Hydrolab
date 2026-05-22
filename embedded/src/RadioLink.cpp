@@ -2,12 +2,8 @@
 
 #include <Arduino.h>
 
-RadioLink::RadioLink(HardwareSerial& serial)
+RadioLink::RadioLink(Stream& serial)
     : serial_(serial) {}
-
-void RadioLink::begin(uint32_t baud) {
-    serial_.begin(baud);
-}
 
 void RadioLink::on_frame(FrameHandler handler, void* ctx) {
     handler_ = handler;

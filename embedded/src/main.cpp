@@ -21,6 +21,12 @@
 
 namespace {
 
+// HARDWARE QUIRK — ESP32-S3 production board.
+// GPIO 4 holds the soft-power latch. If it's not driven HIGH within
+// the first few ms after boot, the latch releases and the whole board
+// powers off. setup() must do this BEFORE anything else.
+constexpr int POWER_LATCH_PIN = 4;
+
 constexpr const char* FIRMWARE_VERSION = "0.1.0-skeleton";
 
 // USB Serial @ 115200 during skeleton development. See top-of-file
@@ -45,7 +51,12 @@ void on_frame(void* /*ctx*/, frame::Type type,
 }  // namespace
 
 void setup() {
-    g_radio.begin(LINK_BAUD);
+    // First action: latch power on. Do this before anything else can
+    // float GPIO 4 — otherwise the board self-powers-off mid-init.
+    pinMode(POWER_LATCH_PIN, OUTPUT);
+    digitalWrite(POWER_LATCH_PIN, HIGH);
+
+    Serial.begin(LINK_BAUD);
     delay(200);  // brief settle so the BOOT event isn't lost on hot-attach
     g_radio.on_frame(on_frame, nullptr);
     g_controller.boot(FIRMWARE_VERSION);
