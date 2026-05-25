@@ -8,6 +8,7 @@
 #include "RadioLink.h"
 #include "Clock.h"
 #include "ServoBus.h"
+#include "PumpControl.h"
 
 namespace {
 
@@ -39,6 +40,7 @@ void MissionControl::tick() {
         if (t.consume_step_change()) {
             emit_tank_step(t);
             drive_servo_for_step(t);
+            drive_pump_for_step(t);
         }
     }
 
@@ -115,6 +117,11 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
         const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
         const size_t args_len = static_cast<size_t>(end - args);
         cmd_servo_ping(verb, args, args_len);
+    }
+    else if (matches("PUMP")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_pump(verb, args, args_len);
     }
     else if (matches("GPIO")) {
         const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
@@ -331,6 +338,12 @@ void MissionControl::cmd_estop(const char* verb) {
     for (auto& t : tanks_) {
         if (t.state() == TankState::SAMPLING) t.abort();
     }
+    // Safety: force every pump off immediately, regardless of where
+    // each Sampler was in its FSM. The step-change hook would do this
+    // anyway as tanks transition to FAULT, but the explicit stop_all
+    // is a belt-and-braces guard against any tank that was already
+    // outside the SAMPLING path.
+    if (pump_control_) pump_control_->stop_all();
     set_mode(SystemMode::E_STOP);
 }
 
@@ -422,6 +435,42 @@ void MissionControl::emit_tank_step(Sampler& tank) {
     send_payload(buf);
 }
 
+// CMD,PUMP,<id>,<state> — turn a single pump on (state=1) or off
+// (state=0). Used for bench testing the pump GPIOs directly; the
+// Sampler FSM drives pumps automatically during the PUMPING step.
+void MissionControl::cmd_pump(const char* verb, const char* args, size_t args_len) {
+    if (!pump_control_) {
+        emit_nack(verb, "no_pump_control");
+        return;
+    }
+
+    char buf[16] = {0};
+    if (args_len == 0 || args_len >= sizeof(buf)) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    memcpy(buf, args, args_len);
+
+    char* comma = strchr(buf, ',');
+    if (!comma) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    *comma = '\0';
+    const int id    = atoi(buf);
+    const int state = atoi(comma + 1);
+    if (id < 1 || id > 3 || (state != 0 && state != 1)) {
+        emit_nack(verb, "out_of_range");
+        return;
+    }
+
+    pump_control_->set(static_cast<uint8_t>(id), state != 0);
+    char ack[64];
+    snprintf(ack, sizeof(ack), "EVT,SYS,PUMP,id=%d,state=%d", id, state);
+    send_payload(ack);
+    emit_ack(verb);
+}
+
 // Wire Sampler step transitions to the per-tank servo. Sampler IDs
 // 1/2/3 line up 1:1 with servo IDs 1/2/3 (the IDs we programmed via
 // CMD,SERVO_SET_ID). Only DESCENDING and ASCENDING steps actually
@@ -442,6 +491,16 @@ void MissionControl::drive_servo_for_step(const Sampler& tank) {
         case TankStep::NONE:
             break;  // no servo motion at these steps
     }
+}
+
+// Drive the pump for `tank` based on its current step. Pump on
+// exactly when the tank is in PUMPING; off for every other step
+// (including NONE on FAULT). Idempotent — safe to call on every
+// step change.
+void MissionControl::drive_pump_for_step(const Sampler& tank) {
+    if (!pump_control_) return;
+    const bool should_pump = (tank.step() == TankStep::PUMPING);
+    pump_control_->set(tank.id(), should_pump);
 }
 
 void MissionControl::emit_boot(const char* version) {

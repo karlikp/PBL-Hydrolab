@@ -25,6 +25,7 @@ class Clock;
 class RadioLink;
 class BatteryMonitor;
 class ServoBus;
+class PumpControl;
 
 enum class SystemMode : uint8_t {
     IDLE,
@@ -59,6 +60,10 @@ public:
     // Optional: attach the servo bus so CMD,SERVO_MOVE,<id>,<pos> works.
     void set_servo_bus(ServoBus* sb) { servo_bus_ = sb; }
 
+    // Optional: attach the pump controller so the PUMPING step actually
+    // turns a pump on, and CMD,PUMP,<id>,<state> works for bench tests.
+    void set_pump_control(PumpControl* pc) { pump_control_ = pc; }
+
 private:
     Clock&     clock_;
     RadioLink& radio_;
@@ -67,6 +72,7 @@ private:
     Sampler tanks_[3];
     BatteryMonitor* battery_ = nullptr;
     ServoBus*       servo_bus_ = nullptr;
+    PumpControl*    pump_control_ = nullptr;
 
     // Command handlers
     void cmd_start_tank(uint8_t idx, const char* verb);
@@ -79,6 +85,7 @@ private:
     void cmd_servo_set_id(const char* verb, const char* args, size_t args_len);
     void cmd_servo_bcast_set_id(const char* verb, const char* args, size_t args_len);
     void cmd_servo_ping(const char* verb, const char* args, size_t args_len);
+    void cmd_pump(const char* verb, const char* args, size_t args_len);
     void cmd_gpio(const char* verb, const char* args, size_t args_len);
 
     void set_mode(SystemMode m);
@@ -95,6 +102,9 @@ private:
 
     // Drive the tank's servo on DESCENDING/ASCENDING step entries.
     void drive_servo_for_step(const Sampler& tank);
+
+    // Drive the tank's pump on PUMPING entry, off on any other step.
+    void drive_pump_for_step(const Sampler& tank);
 
     void send_payload(const char* payload);
 

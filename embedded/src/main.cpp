@@ -30,6 +30,7 @@
 #  include "Clock.h"
 #  include "FrameCodec.h"
 #  include "MissionControl.h"
+#  include "PumpControl.h"
 #  include "RadioLink.h"
 #  include "RadioTransport.h"
 #  include "Telemetry.h"
@@ -72,6 +73,7 @@ MissionControl g_controller(g_clock, g_radio);
 Telemetry      g_telemetry(g_clock, g_radio);
 #ifdef BOARD_ESP32_S3
 BatteryMonitor g_battery(g_clock, g_radio, BATTERY_ADC_PIN, POWER_LATCH_PIN);
+PumpControl    g_pumps;
 #endif
 
 void on_frame(void* /*ctx*/, frame::Type type,
@@ -237,8 +239,10 @@ void setup() {
 
 #ifdef BOARD_ESP32_S3
     g_battery.begin();
+    g_pumps.begin();
     g_controller.set_battery_monitor(&g_battery);
     g_controller.set_servo_bus(&g_servo_bus);
+    g_controller.set_pump_control(&g_pumps);
 #endif
 
     g_controller.boot(FIRMWARE_VERSION);
