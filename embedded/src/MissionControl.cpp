@@ -7,6 +7,20 @@
 #include "BatteryMonitor.h"
 #include "RadioLink.h"
 #include "Clock.h"
+#include "ServoBus.h"
+
+namespace {
+
+// Per-tank winch endpoints, driven on Sampler step transitions.
+// HOME = stowed/rolled-back, UNROLLED = fully extended for sampling.
+// SC-09 position range is 0..1023; staying slightly inside the
+// extremes avoids hitting mechanical end-stops. Tune these as the
+// physical mechanism gets characterised — the firmware does no other
+// magic, just commands the SC-09 to these absolute positions.
+constexpr uint16_t SAMPLER_HOME_POSITION     = 0;
+constexpr uint16_t SAMPLER_UNROLLED_POSITION = 1000;
+
+}  // namespace
 
 MissionControl::MissionControl(Clock& clock, RadioLink& radio)
     : clock_(clock),
@@ -22,7 +36,10 @@ void MissionControl::tick() {
 
     for (auto& t : tanks_) {
         if (t.consume_state_change()) emit_tank_state(t);
-        if (t.consume_step_change())  emit_tank_step(t);
+        if (t.consume_step_change()) {
+            emit_tank_step(t);
+            drive_servo_for_step(t);
+        }
     }
 
     // When the last sampling tank finishes, drop back to IDLE.
@@ -79,6 +96,31 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
     else if (matches("STATUS"))         cmd_status(verb);
     else if (matches("PING"))           cmd_ping(verb);
     else if (matches("ADC_SCAN"))       cmd_adc_scan(verb);
+    else if (matches("SERVO_MOVE")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_servo_move(verb, args, args_len);
+    }
+    else if (matches("SERVO_SET_ID")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_servo_set_id(verb, args, args_len);
+    }
+    else if (matches("SERVO_BCAST_SET_ID")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_servo_bcast_set_id(verb, args, args_len);
+    }
+    else if (matches("SERVO_PING")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_servo_ping(verb, args, args_len);
+    }
+    else if (matches("GPIO")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_gpio(verb, args, args_len);
+    }
     else                                 emit_nack(verb, "unknown_command");
 }
 
@@ -103,6 +145,173 @@ void MissionControl::cmd_adc_scan(const char* verb) {
                  pin, raw, static_cast<unsigned long>(mv));
         send_payload(buf);
     }
+}
+
+// CMD,SERVO_MOVE,<id>,<position> — sends a goal-position write to the
+// servo bus. id=254 is broadcast (every servo on the bus moves).
+// position is 0..1023.
+void MissionControl::cmd_servo_move(const char* verb, const char* args, size_t args_len) {
+    if (!servo_bus_) {
+        emit_nack(verb, "no_servo_bus");
+        return;
+    }
+
+    // Parse "<id>,<pos>" — copy to a stack buffer for atoi.
+    char buf[32] = {0};
+    if (args_len == 0 || args_len >= sizeof(buf)) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    memcpy(buf, args, args_len);
+
+    char* comma = strchr(buf, ',');
+    if (!comma) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    *comma = '\0';
+    const int id = atoi(buf);
+    const int pos = atoi(comma + 1);
+    if (id < 0 || id > 254 || pos < 0 || pos > 1023) {
+        emit_nack(verb, "out_of_range");
+        return;
+    }
+
+    servo_bus_->move(static_cast<uint8_t>(id), static_cast<uint16_t>(pos));
+    char ack[64];
+    snprintf(ack, sizeof(ack), "EVT,SYS,SERVO_MOVE,id=%d,pos=%d", id, pos);
+    send_payload(ack);
+    emit_ack(verb);
+}
+
+// CMD,SERVO_SET_ID,<current_id>,<new_id> — re-assign one servo's ID.
+// Run with ONLY that one servo connected to the bus (fresh servos all
+// share ID=1, so daisy-chaining would collide).
+void MissionControl::cmd_servo_set_id(const char* verb, const char* args, size_t args_len) {
+    if (!servo_bus_) {
+        emit_nack(verb, "no_servo_bus");
+        return;
+    }
+
+    char buf[32] = {0};
+    if (args_len == 0 || args_len >= sizeof(buf)) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    memcpy(buf, args, args_len);
+
+    char* comma = strchr(buf, ',');
+    if (!comma) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    *comma = '\0';
+    const int cur = atoi(buf);
+    const int nxt = atoi(comma + 1);
+    if (cur < 1 || cur > 253 || nxt < 1 || nxt > 253) {
+        emit_nack(verb, "out_of_range");  // 0xFE = broadcast, 0xFF = invalid
+        return;
+    }
+
+    const bool ok = servo_bus_->set_id(static_cast<uint8_t>(cur),
+                                       static_cast<uint8_t>(nxt));
+    if (!ok) {
+        emit_nack(verb, "set_id_failed");
+        return;
+    }
+
+    char ack[64];
+    snprintf(ack, sizeof(ack), "EVT,SYS,SERVO_SET_ID,from=%d,to=%d", cur, nxt);
+    send_payload(ack);
+    emit_ack(verb);
+}
+
+// CMD,SERVO_BCAST_SET_ID,<new_id> — broadcast write to the ID register
+// of EVERY servo on the bus. No replies expected. Use to collapse
+// multiple unknown-ID servos to a known shared ID, as a setup move
+// for combinatorial unique-ID assignment.
+void MissionControl::cmd_servo_bcast_set_id(const char* verb, const char* args, size_t args_len) {
+    if (!servo_bus_) {
+        emit_nack(verb, "no_servo_bus");
+        return;
+    }
+
+    char buf[16] = {0};
+    if (args_len == 0 || args_len >= sizeof(buf)) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    memcpy(buf, args, args_len);
+    const int nxt = atoi(buf);
+    if (nxt < 1 || nxt > 253) {
+        emit_nack(verb, "out_of_range");
+        return;
+    }
+
+    servo_bus_->broadcast_set_id(static_cast<uint8_t>(nxt));
+    char ack[64];
+    snprintf(ack, sizeof(ack), "EVT,SYS,SERVO_BCAST_SET_ID,to=%d", nxt);
+    send_payload(ack);
+    emit_ack(verb);
+}
+
+// CMD,SERVO_PING,<id> — best-effort ping to confirm a servo is present.
+// Returns EVT,SYS,SERVO_PING,id=<id>,reply=<id-or--1>.
+void MissionControl::cmd_servo_ping(const char* verb, const char* args, size_t args_len) {
+    if (!servo_bus_) {
+        emit_nack(verb, "no_servo_bus");
+        return;
+    }
+
+    char buf[16] = {0};
+    if (args_len == 0 || args_len >= sizeof(buf)) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    memcpy(buf, args, args_len);
+    const int id = atoi(buf);
+    if (id < 1 || id > 253) {
+        emit_nack(verb, "out_of_range");
+        return;
+    }
+
+    const int reply = servo_bus_->ping(static_cast<uint8_t>(id));
+    char ev[64];
+    snprintf(ev, sizeof(ev), "EVT,SYS,SERVO_PING,id=%d,reply=%d", id, reply);
+    send_payload(ev);
+    emit_ack(verb);
+}
+
+// CMD,GPIO,<pin>,<level> — drive an arbitrary GPIO HIGH or LOW.
+// Diagnostic only — used to experimentally find which pin is TXEN by
+// driving candidate GPIOs HIGH and seeing if the servo bus comes
+// alive. Don't use this on production-assigned pins (it'll fight
+// the actual drivers).
+void MissionControl::cmd_gpio(const char* verb, const char* args, size_t args_len) {
+    char buf[32] = {0};
+    if (args_len == 0 || args_len >= sizeof(buf)) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    memcpy(buf, args, args_len);
+    char* comma = strchr(buf, ',');
+    if (!comma) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    *comma = '\0';
+    const int pin = atoi(buf);
+    const int lvl = atoi(comma + 1);
+    if (pin < 0 || pin > 48) {
+        emit_nack(verb, "bad_pin");
+        return;
+    }
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, lvl ? HIGH : LOW);
+    char ack[64];
+    snprintf(ack, sizeof(ack), "EVT,SYS,GPIO,pin=%d,level=%d", pin, lvl ? 1 : 0);
+    send_payload(ack);
+    emit_ack(verb);
 }
 
 void MissionControl::cmd_start_tank(uint8_t idx, const char* verb) {
@@ -211,6 +420,28 @@ void MissionControl::emit_tank_step(Sampler& tank) {
     snprintf(buf, sizeof(buf), "EVT,%s,STEP,%s",
              tank_source(tank.id() - 1), step_name(tank.step()));
     send_payload(buf);
+}
+
+// Wire Sampler step transitions to the per-tank servo. Sampler IDs
+// 1/2/3 line up 1:1 with servo IDs 1/2/3 (the IDs we programmed via
+// CMD,SERVO_SET_ID). Only DESCENDING and ASCENDING steps actually
+// move the servo; the IN_WATER / PUMPING / HOME steps are pure mock
+// dwells while the rest of the mechanism (pump, end-stops) lands.
+void MissionControl::drive_servo_for_step(const Sampler& tank) {
+    if (!servo_bus_) return;
+    switch (tank.step()) {
+        case TankStep::DESCENDING:
+            servo_bus_->move(tank.id(), SAMPLER_UNROLLED_POSITION);
+            break;
+        case TankStep::ASCENDING:
+            servo_bus_->move(tank.id(), SAMPLER_HOME_POSITION);
+            break;
+        case TankStep::IN_WATER:
+        case TankStep::PUMPING:
+        case TankStep::HOME:
+        case TankStep::NONE:
+            break;  // no servo motion at these steps
+    }
 }
 
 void MissionControl::emit_boot(const char* version) {

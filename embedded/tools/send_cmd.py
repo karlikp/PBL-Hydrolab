@@ -38,8 +38,10 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("verb", help="Command verb, e.g. START_C1, STATUS, PING")
-    parser.add_argument("args", nargs="?", default="",
-                        help="Optional command argument string (most verbs take none)")
+    parser.add_argument("args", nargs="*",
+                        help="Zero or more argument values; joined with commas "
+                             "on the wire (so 'SERVO_MOVE 254 500' sends "
+                             "CMD,SERVO_MOVE,254,500)")
     parser.add_argument("-p", "--port", default="/dev/ttyUSB0",
                         help="Serial port (default: /dev/ttyUSB0)")
     parser.add_argument("-b", "--baud", type=int, default=115200,
@@ -49,7 +51,8 @@ def main() -> int:
                              "Set to 0 to skip listening. (default: 5)")
     a = parser.parse_args()
 
-    payload = f"CMD,{a.verb},{a.args}"
+    args_joined = ",".join(a.args)
+    payload = f"CMD,{a.verb},{args_joined}"
     frame = build_frame(payload)
 
     try:

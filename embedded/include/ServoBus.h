@@ -1,0 +1,92 @@
+// ServoBus — driver for the Waveshare SC-09 / Feetech SCS bus.
+//
+// Three smart servos (one per tank) sit on a single half-duplex UART
+// bus. The board uses a non-standard ESP32-S3 UART0 pin mapping for
+// this bus: TX = GPIO 44, RX = GPIO 43 (the opposite of the chip's
+// default). See docs/hardware/servo_uart_pinout.md.
+//
+// This class wraps Waveshare's official SCServo library so callers get
+// a deliberately small API (move() / move_all() / ping()) instead of
+// the library's full surface area. Direction control on the half-
+// duplex bus is handled by the board's analog circuitry — firmware
+// just writes UART bytes.
+//
+// SCServo.h is intentionally NOT included here: TUs that only call
+// the ServoBus API (e.g. MissionControl) shouldn't have to pull in the
+// SCServo dependency. The implementation hides it behind PImpl.
+
+#pragma once
+
+#include <stdint.h>
+
+class HardwareSerial;
+
+class ServoBus {
+public:
+    static constexpr uint8_t  BROADCAST_ID = 0xFE;
+    static constexpr uint32_t DEFAULT_BAUD = 1000000;  // SC-09 factory default
+
+    // SC-09 bus UART pins on the production board. Anomalous vs. the
+    // ESP32-S3 datasheet defaults — TX/RX are swapped. Do NOT change
+    // without re-reading docs/hardware/servo_uart_pinout.md.
+    static constexpr int TX_PIN = 44;
+    static constexpr int RX_PIN = 43;
+
+    // The caller hands in a HardwareSerial that has already been
+    // begin()ed at the right baud with the swapped RX/TX pins.
+    explicit ServoBus(HardwareSerial& serial);
+    ~ServoBus();
+
+    ServoBus(const ServoBus&)            = delete;
+    ServoBus& operator=(const ServoBus&) = delete;
+
+    // Send a goal-position WRITE to one servo (or BROADCAST_ID).
+    //   position : 0..1023 (clipped)
+    //   speed    : 0..1023 step rate; 1500 is the SCServo lib default
+    // Best-effort — broadcast writes don't get a reply.
+    bool move(uint8_t id, uint16_t position, uint16_t speed = 1500);
+
+    // Broadcast move — every servo on the bus.
+    bool move_all(uint16_t position, uint16_t speed = 1500) {
+        return move(BROADCAST_ID, position, speed);
+    }
+
+    // PING — sends an SCS PING instruction and reads back.
+    //
+    // CAVEAT: the bus is half-duplex on a single wire, and the
+    // SCServo lib does not drain the TX echo on RX before reading
+    // the reply. The echo of a PING packet happens to match the
+    // shape of a successful status reply, so this function returns
+    // the queried `id` even when NO servo at that ID exists. In
+    // other words: it cannot reliably distinguish "servo present"
+    // from "echoing my own packet."
+    //
+    // For ground-truth bus state, send a MOVE to the suspected ID
+    // and watch which servo (if any) physically moves. A proper
+    // fix is to wrap the underlying Stream and discard N echoed
+    // bytes after every TX before Ack reads — not done yet.
+    int ping(uint8_t id);
+
+    // Re-assign a servo's ID. Sequence: unlock EEPROM on the current
+    // ID, write the new ID byte at address SCSCL_ID, lock EEPROM on
+    // the new ID. Returns true if all three steps reported success.
+    //
+    // Requires exactly ONE servo on the bus to have current_id —
+    // otherwise the simultaneous replies collide and the library
+    // reports failure (so the write is skipped).
+    bool set_id(uint8_t current_id, uint8_t new_id);
+
+    // Broadcast variant: rewrite ID register on EVERY servo on the
+    // bus to new_id. Uses ID 0xFE for unlock/write/lock — servos
+    // execute but never reply, so collision is irrelevant. Always
+    // returns true (the underlying broadcast can't be acked).
+    //
+    // Useful when you can't physically isolate one servo at a time
+    // but can selectively unplug enough of them to set up a state
+    // where a targeted set_id() can then pick off a single survivor.
+    bool broadcast_set_id(uint8_t new_id);
+
+private:
+    struct Impl;
+    Impl* impl_;
+};

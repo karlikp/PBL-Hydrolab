@@ -24,6 +24,7 @@
 class Clock;
 class RadioLink;
 class BatteryMonitor;
+class ServoBus;
 
 enum class SystemMode : uint8_t {
     IDLE,
@@ -55,6 +56,9 @@ public:
     // current battery voltage. nullptr is fine (e.g. on classic env).
     void set_battery_monitor(BatteryMonitor* bm) { battery_ = bm; }
 
+    // Optional: attach the servo bus so CMD,SERVO_MOVE,<id>,<pos> works.
+    void set_servo_bus(ServoBus* sb) { servo_bus_ = sb; }
+
 private:
     Clock&     clock_;
     RadioLink& radio_;
@@ -62,6 +66,7 @@ private:
     bool mode_changed_ = false;
     Sampler tanks_[3];
     BatteryMonitor* battery_ = nullptr;
+    ServoBus*       servo_bus_ = nullptr;
 
     // Command handlers
     void cmd_start_tank(uint8_t idx, const char* verb);
@@ -70,6 +75,11 @@ private:
     void cmd_status(const char* verb);
     void cmd_ping(const char* verb);
     void cmd_adc_scan(const char* verb);
+    void cmd_servo_move(const char* verb, const char* args, size_t args_len);
+    void cmd_servo_set_id(const char* verb, const char* args, size_t args_len);
+    void cmd_servo_bcast_set_id(const char* verb, const char* args, size_t args_len);
+    void cmd_servo_ping(const char* verb, const char* args, size_t args_len);
+    void cmd_gpio(const char* verb, const char* args, size_t args_len);
 
     void set_mode(SystemMode m);
     bool any_tank_sampling() const;
@@ -82,6 +92,9 @@ private:
     void emit_tank_state(Sampler& tank);
     void emit_tank_step(Sampler& tank);
     void emit_boot(const char* version);
+
+    // Drive the tank's servo on DESCENDING/ASCENDING step entries.
+    void drive_servo_for_step(const Sampler& tank);
 
     void send_payload(const char* payload);
 
