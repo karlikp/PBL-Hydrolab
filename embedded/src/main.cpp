@@ -24,6 +24,11 @@
 
 #include <Arduino.h>
 
+#ifdef BOARD_ESP32_S3
+#  include <WiFi.h>
+#  include <esp_bt.h>
+#endif
+
 #include "ServoBus.h"
 #if !defined(ISOLATE_UART0_FOR_SERVO) && !defined(RADIO_TEST_MODE)
 #  include "BatteryMonitor.h"
@@ -48,6 +53,27 @@ constexpr int POWER_LATCH_PIN = 4;
 constexpr int BATTERY_ADC_PIN = 5;
 
 constexpr const char* FIRMWARE_VERSION = "0.1.0-skeleton";
+
+#ifdef BOARD_ESP32_S3
+// Production-board first-cycle init.
+//
+//   1) Drive the soft-power latch HIGH within the first few ms of
+//      boot — if we miss the window the latch releases and the board
+//      powers itself off mid-setup().
+//   2) Explicitly disable WiFi and Bluetooth. Arduino-ESP32 doesn't
+//      auto-start either, but the radio peripherals can still be in
+//      a low-power-but-non-zero state until told to shut down. Doing
+//      this also releases their internal task/RAM resources.
+//
+// Call this as the FIRST thing in every S3 build's setup() — before
+// Serial.begin, before any other peripheral.
+void early_board_init() {
+    pinMode(POWER_LATCH_PIN, OUTPUT);
+    digitalWrite(POWER_LATCH_PIN, HIGH);
+    WiFi.mode(WIFI_OFF);
+    btStop();
+}
+#endif
 
 #if defined(ISOLATE_UART0_FOR_SERVO) || defined(RADIO_TEST_MODE)
 // Bring-up builds — strip the operator stack out of the globals.
@@ -121,8 +147,7 @@ constexpr int      RFD_IO_B            = 11;  // board net RFD_TX
 }  // namespace
 
 void setup() {
-    pinMode(POWER_LATCH_PIN, OUTPUT);
-    digitalWrite(POWER_LATCH_PIN, HIGH);
+    early_board_init();
 
     // CP210x debug log uses standard UART0 pin map at 115200. Boot
     // log will appear on /dev/ttyUSB0 immediately.
@@ -194,8 +219,7 @@ HardwareSerial& servo_serial = Serial;
 ServoBus servos(servo_serial);
 
 void setup() {
-    pinMode(POWER_LATCH_PIN, OUTPUT);
-    digitalWrite(POWER_LATCH_PIN, HIGH);
+    early_board_init();
 
     servo_serial.begin(ServoBus::DEFAULT_BAUD, SERIAL_8N1,
                        ServoBus::RX_PIN, ServoBus::TX_PIN);
@@ -217,11 +241,8 @@ void loop() {
 
 void setup() {
 #ifdef BOARD_ESP32_S3
-    // First action on the production board: latch power on. Do this
-    // before anything else can float GPIO 4 — otherwise the board
-    // self-powers-off mid-init.
-    pinMode(POWER_LATCH_PIN, OUTPUT);
-    digitalWrite(POWER_LATCH_PIN, HIGH);
+    // Power latch + WiFi/BT off — must run before anything else.
+    early_board_init();
 
     // UART0 → servo bus (swapped TX=44/RX=43). Operator comms is on
     // the radio (Serial1), set up just below.
