@@ -113,19 +113,20 @@ The drone broadcasts a telemetry frame **every 500 ms** (2 Hz) while
 it's powered on. It looks like this:
 
 ```
-TLM,<timestamp>,<lat>,<lon>,<cond>,<temp>,<ph>,<oxygen>,<water_flag>*<checksum>
+TLM,<timestamp>,<lat>,<lon>,<cond>,<temp>,<ph>,<oxygen>,<water_flag>,<measurement_valid>*<checksum>
 ```
 
-| Field          | What it is                                       | Example          |
-|----------------|--------------------------------------------------|------------------|
-| `timestamp`    | Date and time from the drone's GPS               | `2026-05-15 14:30:00` |
-| `lat`          | Latitude as integer ×10,000,000                  | `521230000` = 52.1230000° |
-| `lon`          | Longitude as integer ×10,000,000                 | `210110000` = 21.0110000° |
-| `cond`         | Conductivity, mS/cm                              | `432.10`         |
-| `temp`         | Water temperature, °C                            | `18.50`          |
-| `ph`           | pH                                               | `7.21`           |
-| `oxygen`       | Dissolved oxygen, mg/L                           | `8.30`           |
-| `water_flag`   | `0` = sensor in air, `1` = sensor under water    | `1`              |
+| Field                 | What it is                                       | Example          |
+|-----------------------|--------------------------------------------------|------------------|
+| `timestamp`           | Date and time from the drone's GPS               | `2026-05-15 14:30:00` |
+| `lat`                 | Latitude as integer ×10,000,000                  | `521230000` = 52.1230000° |
+| `lon`                 | Longitude as integer ×10,000,000                 | `210110000` = 21.0110000° |
+| `cond`                | Conductivity, mS/cm                              | `432.10`         |
+| `temp`                | Water temperature, °C                            | `18.50`          |
+| `ph`                  | pH                                               | `7.21`           |
+| `oxygen`              | Dissolved oxygen, mg/L                           | `8.30`           |
+| `water_flag`          | `0` = sensor in air, `1` = sensor under water    | `1`              |
+| `measurement_valid`   | `1` = probe has settled, the four sensor fields are trustworthy; `0` = probe absent or still settling, fields are informational only | `1` |
 
 > ⚠️ **Heads-up:** lat/lon are scaled integers, not normal decimals.
 > Divide by 10,000,000 to get degrees. This is a leftover convention
@@ -135,6 +136,11 @@ TLM,<timestamp>,<lat>,<lon>,<cond>,<temp>,<ph>,<oxygen>,<water_flag>*<checksum>
 > ⚠️ **Heads-up:** if any sensor field is `0.00`, treat the frame as
 > "sensor not ready" — store it but don't show alarms. This is how the
 > drone signals "I'm warming up". Existing dashboard already does this.
+> The `measurement_valid` flag is a stronger signal: `0` means "do not
+> trust these readings yet" even when the values look plausible. Plot
+> them if you want a settle curve, but don't surface them as the
+> measurement of record. `1` means the probe has reached steady state
+> and the four sensor fields can be relied on.
 
 ---
 
@@ -166,7 +172,7 @@ EVT,<source>,<kind>,<details>*<checksum>
 | `STATE`  | `C1`/`C2`/`C3`           | `EMPTY`, `SAMPLING`, `FULL`, `FAULT` |
 | `STATE`  | `ELMETRON`               | `DOCKED`, `MEASURING`, `FAULT`      |
 | `STATE`  | `SYS`                    | `IDLE`, `SAMPLING`, `MEASURING`, `E_STOP` |
-| `STEP`   | `C1`/`C2`/`C3`/`ELMETRON`| `DESCENDING`, `IN_WATER`, `PUMPING`, `ASCENDING`, `HOME` |
+| `STEP`   | `C1`/`C2`/`C3`/`ELMETRON`| `HOMING` (ELMETRON only), `DESCENDING`, `IN_WATER`, `PUMPING` (C1–C3 only), `ASCENDING`, `HOME` |
 | `ACK`    | `SYS`                    | The command that was accepted (e.g. `START_C1`) |
 | `NACK`   | `SYS`                    | The command and why it was rejected (e.g. `START_C2:busy`) |
 | `ERROR`  | any                      | A short error description (e.g. `limit_switch_timeout`) |
@@ -226,10 +232,15 @@ CMD,START_C1,*04AB1234
 | `START_C2`         | Start sampling tank 2                                         |
 | `START_C3`         | Start sampling tank 3                                         |
 | `START_ELMETRON`   | Start an Elmetron measurement at current position             |
-| `E_STOP`           | Emergency stop — abort everything, move any in-progress op to FAULT |
+| `STOP_C1`          | Stop tank 1 in place (FAULT) without latching system E-STOP. Cable / pump halt where they are; tank can be `RESET_C1`-ed independently. Other subsystems keep running. |
+| `STOP_C2`          | (same for tank 2)                                             |
+| `STOP_C3`          | (same for tank 3)                                             |
+| `STOP_ELMETRON`    | Stop Elmetron in place (FAULT) without latching system E-STOP |
+| `E_STOP`           | Emergency stop — abort everything, move any in-progress op to FAULT, latch the system in `E_STOP` until **all** faulted subsystems are reset. |
 | `RESET_C1`         | Clear tank 1's `FAULT` and move it back to `EMPTY`            |
 | `RESET_C2`         | (same for tank 2)                                             |
 | `RESET_C3`         | (same for tank 3)                                             |
+| `RESET_ELMETRON`   | Clear Elmetron's `FAULT` and move it back to `DOCKED`         |
 | `STATUS`           | Ask the drone for a snapshot — it replies with one `EVT,STATE` per subsystem |
 | `PING`             | Check the link is alive — drone responds `EVT,SYS,ACK,PING`   |
 
@@ -254,6 +265,9 @@ keep listening for the follow-up `STEP` and `STATE` events.
 | `busy`              | Another sampling or measurement is in progress — wait for it to finish |
 | `tank_full`         | Tank is already full — empty it manually, or pick a different tank   |
 | `fault`             | Tank is in fault state — send `RESET_Cx` first                       |
+| `not_running`       | `STOP_*` was sent against a subsystem that isn't currently active   |
+| `not_in_fault`      | `RESET_ELMETRON` was sent while Elmetron wasn't in `FAULT`           |
+| `not_implemented`   | The targeted subsystem isn't attached on this build                 |
 | `e_stop_active`     | Drone is in E-STOP mode — only `RESET_*` and `STATUS` work until reset |
 | `unknown_command`   | The drone doesn't recognise this command (version mismatch?)         |
 
