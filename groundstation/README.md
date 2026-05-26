@@ -1,142 +1,233 @@
-# H2O Drone – Water Quality Monitoring
+# Ground station — H2O drone
 
-FastAPI backend + web dashboard for a water-quality drone. A radio module streams
-telemetry frames over a serial link; the backend validates, stores, and exposes
-them; the browser UI plots them on a map and on live charts.
+FastAPI backend + browser dashboard for operating the water-quality
+drone over a serial link (either the RFD868 radio for real missions or
+a CP210x USB adapter for bench testing).
 
-> Branch `chart-extended` adds: oxygen chart, per-parameter statistics cards,
-> Flatpickr date/time filter, chart zoom/pan, CSV export and PNG chart export.
+The dashboard is a **single-screen operator UI**: live system state on
+the left (per-tank cards with state badge, level pill, step indicator,
+Start / Stop / Reset buttons; Elmetron card with live cond/temp/pH/O₂
+readings; live event log; E-STOP button); map + 2×2 chart grid on the
+right for collected measurements.
 
----
+## Run
+
+Requirements: Python 3.10+ and the drone's serial adapter visible to
+the OS (CP210x for bench, FTDI for the radio).
+
+```bash
+cd groundstation
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# Default: CP210x bench (deploy / mock firmware on UART0)
+.venv/bin/uvicorn main:app
+
+# Real radio link
+SERIAL_PORT=/dev/ttyUSB1 SERIAL_BAUD=57600 .venv/bin/uvicorn main:app
+```
+
+Open <http://127.0.0.1:8000/static/> in a browser.
+
+Useful sister URLs:
+
+- <http://127.0.0.1:8000/health> — quick check that the radio thread is
+  alive and which port/baud it opened.
+- <http://127.0.0.1:8000/docs> — FastAPI auto-generated API explorer
+  (you can fire commands from there too).
+- <http://127.0.0.1:8000/api/state/now> — raw JSON snapshot of the live
+  state model.
+- <http://127.0.0.1:8000/api/stream/live> — opens the SSE stream as
+  plain text in the browser; handy when debugging.
+
+## Configuration
+
+| Env var       | Default       | Notes                                                            |
+|---------------|---------------|------------------------------------------------------------------|
+| `SERIAL_PORT` | `/dev/ttyUSB0`| Path or `/dev/serial/by-id/...` symlink.                         |
+| `SERIAL_BAUD` | `115200`      | `115200` for CP210x bench builds; `57600` for the RFD868 radio. |
+
+The SQLite file `drone_data.db` is created in the working directory on
+first run. Schema migrations are idempotent (`CREATE TABLE IF NOT
+EXISTS`) so running against an existing DB just adds the new tables.
+
+## Operator panel
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Title  SYSTEM badge  link / battery / FW / GPS indicators       E-STOP   │
+├─────────────────────────────────┬────────────────────────────────────────┤
+│ Tank C1   [SAMPLING][WET]       │                                        │
+│           step: PUMPING         │       Map (Leaflet + OSM)              │
+│           [Start][Stop][Reset]  │       • Per-tank collection pins       │
+│                                 │         (C1 blue, C2 green, C3 orange) │
+│ Tank C2   [EMPTY][DRY]   ...    │       • Measurement-trace overlay      │
+│ Tank C3   ...                   ├────────────────────────────────────────┤
+│                                 │       Charts (2×2 grid)                │
+│ Elmetron  [MEASURING]           │       pH    │  O₂                      │
+│   step: IN_WATER                │       Temp  │  Cond                    │
+│   cond/temp/pH/O₂  ●valid       │                                        │
+│                                 │                                        │
+│ ┌─ Live event log ─────────────┐│                                        │
+│ │ 14:32:01  EVT,SYS,ACK,...    ││                                        │
+│ │ 14:32:00  EVT,C1,STEP,...    ││                                        │
+│ └──────────────────────────────┘│                                        │
+└─────────────────────────────────┴────────────────────────────────────────┘
+```
+
+- **SYSTEM badge** — colour-coded mode (IDLE grey / SAMPLING blue /
+  MEASURING green / E_STOP red / UNKNOWN yellow until the first
+  STATE event arrives).
+- **Per-tank cards** show the latest STATE (EMPTY / SAMPLING / FULL /
+  FAULT), the active STEP, and a live **WET / DRY** pill driven by a
+  background poll (`CMD,LEVEL,N` round-robins through all three tanks
+  every ~2 s).
+- **Button enable rules** mirror the firmware's `is_busy()` and the
+  "concurrent sampling prohibited" project constraint. Start is
+  disabled while anything else is sampling/measuring; Stop is enabled
+  only when this subsystem is active; Reset is enabled only when this
+  subsystem is in FAULT (or FULL for tanks).
+- **E-STOP** is always enabled, always red, top-right. Latches the
+  system in `E_STOP` mode until every faulted subsystem is reset.
+- **Live event log** shows EVT frames in real time, colour-coded
+  (ACK green, NACK / ERROR red). The `LEVEL` poll noise is filtered
+  out so other events aren't drowned.
+- **Map** shows one **collection pin per tank** at the GPS position
+  the drone reported when the tank reached FULL. Per-tank colours.
+  Measurement-trace dots are a separate layer that survives chart
+  refreshes.
+
+## What gets logged where
+
+Three DB tables, plus an in-memory live state for the operator panel
+and an SSE stream pushing events to the browser as they arrive.
+
+| Table          | One row per                                          | Driven by                                       |
+|----------------|------------------------------------------------------|-------------------------------------------------|
+| `measurements` | TLM frame **while system mode is MEASURING**         | Live SSE → write-through                        |
+| `collections`  | `EVT,Cx,COLLECTED` (tank physically filled + geo-tagged) | Live SSE → write-through                    |
+| `events`       | Every EVT frame (audit log)                          | Live SSE → write-through                        |
+| `telemetry`    | (legacy, no longer written to)                       | Preserved so old data isn't destroyed           |
+
+Heartbeat TLMs received outside MEASURING are intentionally **not**
+persisted — they only serve "drone is alive" and that's tracked in
+the live link indicator. Keeps the measurements table lean.
+
+## API
+
+| Method | Path                              | Purpose                                                                |
+|--------|-----------------------------------|------------------------------------------------------------------------|
+| GET    | `/health`                         | Liveness + port/baud                                                   |
+| GET    | `/api/state/now`                  | Snapshot of the live state (system mode, tanks, elmetron, etc.)       |
+| GET    | `/api/stream/live`                | **Server-Sent Events** stream: every TLM, every EVT, plus initial snapshot on connect |
+| GET    | `/api/measurements/recent`        | Historical measurements (`?limit=` / `?valid_only=true` / `?start=` / `?end=`) |
+| GET    | `/api/collections/recent`         | Historical collections                                                 |
+| GET    | `/api/events/recent`              | Audit log                                                              |
+| POST   | `/api/cmd/{verb}?args=a,b,c`      | Build an Adler-32 framed CMD and write it to the serial port. ACK/NACK comes back through the EVT stream. |
+| GET    | `/api/data/all_readings`          | Legacy alias; returns measurement rows under the old key names.       |
+
+Examples:
+
+```bash
+# Send a PING
+curl -X POST http://127.0.0.1:8000/api/cmd/PING
+
+# Start tank 1
+curl -X POST http://127.0.0.1:8000/api/cmd/START_C1
+
+# Probe the level sensor for tank 2
+curl -X POST 'http://127.0.0.1:8000/api/cmd/LEVEL?args=2'
+
+# Re-id servo from 3 to 2 (see the embedded README for full procedure)
+curl -X POST 'http://127.0.0.1:8000/api/cmd/SERVO_SET_ID?args=3,2'
+
+# Manual servo move
+curl -X POST 'http://127.0.0.1:8000/api/cmd/SERVO_MOVE?args=2,500'
+
+# Subscribe to the live stream (Ctrl+C to exit)
+curl -N http://127.0.0.1:8000/api/stream/live
+```
+
+The full CMD verb list lives in [`docs/protocol.md`](../docs/protocol.md).
 
 ## Architecture
 
 ```
- ┌────────────┐   serial    ┌──────────────────┐   SQLite   ┌────────────┐
- │ Drone / TX │ ──────────▶ │ RadioService     │ ─────────▶ │ drone_data │
- │ (SiK radio)│   57600 8N1 │ (background      │            │   .db      │
- └────────────┘             │  thread)         │            └─────┬──────┘
-                            └────────┬─────────┘                  │
-                                     │                            │
-                                     ▼                            ▼
-                            ┌──────────────────┐    GET /api/data/all_readings
-                            │ FastAPI (main.py)│ ◀───────────────────────────┐
-                            └────────┬─────────┘                             │
-                                     │ /static                               │
-                                     ▼                                       │
-                            ┌──────────────────┐                             │
-                            │ static/index.html│ ─── fetch() every 5s ───────┘
-                            │ Leaflet + Chart.js│
-                            └──────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│ FastAPI process                                                      │
+│                                                                      │
+│  RadioService background thread (radio.py)                           │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │ serial.Serial(port, baud)                                      │  │
+│  │  readline() → Adler-32 verify → parse TLM/EVT → dispatch       │  │
+│  │    → update LiveState (under lock)                             │  │
+│  │    → insert_measurement / insert_collection / insert_event     │  │
+│  │    → broadcast({type, ...}) → call_soon_threadsafe per subscriber │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                       │                ▲                             │
+│                       │   write_lock   │                             │
+│                       ▼                │                             │
+│                  ┌────────────────┐    │ asyncio.Queue per SSE       │
+│                  │ send_cmd()     │    │ subscriber                  │
+│                  └────────────────┘    │                             │
+│                       ▲                │                             │
+│                       │                │                             │
+│              POST /api/cmd/{verb}      │ /api/stream/live (SSE)      │
+│                       ▲                │ /api/state/now              │
+│                       │                │ /api/{measurements,...}     │
+│                       │                │                             │
+│  Background tasks:                     │                             │
+│  • status_poller (CMD,STATUS every 30 s — battery refresh)           │
+│  • level_poller  (CMD,LEVEL,1/2/3 round-robin every 0.7 s)           │
+└──────────────────────────────────────────────────────────────────────┘
+                                        ▲
+                                        │ SSE
+                                        │
+                          ┌─────────────────────────────┐
+                          │ Browser (static/index.html) │
+                          │ vanilla JS + Leaflet +      │
+                          │ Chart.js. Operator panel    │
+                          │ + historical dashboard.     │
+                          └─────────────────────────────┘
 ```
 
-### Data flow
-
-1. Drone transmits an ASCII line over the radio:
-   `Time,Lat,Lon,Cond,Temp,pH,O2,WaterFlag*ADLER32HEX`
-2. `RadioService._listen_loop` reads lines, splits on `*`, recomputes **Adler-32**
-   over the data portion and compares against the received hex checksum.
-3. Valid frames are parsed (lat/lon are divided by `10_000_000`), inserted into
-   the `telemetry` SQLite table, and timestamped with server-side `datetime.now()`.
-4. The browser polls `/api/data/all_readings` every 5 s (paused while a date
-   filter is active) and rerenders the map, charts, stats, and history list.
-
----
+Threading: the radio thread mutates `LiveState` and posts events; SSE
+subscribers consume them in the FastAPI event loop. Cross-thread
+signalling uses `loop.call_soon_threadsafe(queue.put_nowait, event)`
+so the asyncio queues stay sound. Serial writes are gated by a
+`threading.Lock` so concurrent CMDs (multiple browsers, automation,
+the level/status pollers) can't interleave bytes on the wire.
 
 ## Repository layout
 
 ```
-main.py                     FastAPI app + lifespan (boots DB + radio thread)
-requirements.txt
-app/
-  api/endpoints.py          /api/data/submit_reading, /api/data/all_readings
-  database.py               sqlite3 wrapper: init_db, insert_reading, get_all_readings
-  schemas/frame_reading.py  Pydantic model for a reading
-  services/radio.py         Serial listener + Adler-32 verification
-static/index.html           Dashboard (Leaflet, Chart.js, chartjs-plugin-zoom, Flatpickr)
+groundstation/
+├── main.py                      FastAPI app, lifespan, pollers, env config
+├── requirements.txt
+├── drone_data.db                SQLite (gitignored, created on first run)
+├── app/
+│   ├── api/endpoints.py         all /api/* routes
+│   ├── database.py              schema + insert/query helpers
+│   ├── schemas/frame_reading.py legacy Pydantic model
+│   └── services/radio.py        serial I/O, frame parser, LiveState, SSE pub/sub
+└── static/
+    └── index.html               operator panel + dashboard (vanilla JS)
 ```
-
-### Frame / table schema
-
-| Field         | Type    | Notes                                           |
-|---------------|---------|-------------------------------------------------|
-| `timestamp`   | TEXT    | ISO-8601, set server-side on receipt           |
-| `lat`, `lon`  | REAL    | degrees; wire format is int ×10⁷              |
-| `cond`        | REAL    | conductivity (µS)                               |
-| `temp`        | REAL    | °C                                              |
-| `ph`          | REAL    |                                                 |
-| `oxygen`      | REAL    | mg/L                                            |
-| `water_flag`  | INTEGER | 0/1, whether the probe is submerged            |
-| `checksum`    | INTEGER | received Adler-32                               |
-
-The `submit_reading` endpoint silently discards frames where any sensor value
-is `0` (treated as "sensor not ready") — it returns the payload without
-inserting it.
-
----
-
-## Running locally
-
-Requirements: Python 3.10+, a serial device at `/dev/ttyUSB1` (change
-`RADIO_PORT` in `main.py` if yours differs — the current default is hard-coded).
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload
-```
-
-Then open:
-
-- Dashboard: http://127.0.0.1:8000/static/
-- API docs:  http://127.0.0.1:8000/docs
-- Health:    http://127.0.0.1:8000/health
-
-The SQLite file `drone_data.db` is created in the working directory on first
-run. If you don't have radio hardware, you can still populate the DB via
-`POST /api/data/submit_reading`.
-
----
-
-## API
-
-| Method | Path                         | Purpose                                  |
-|--------|------------------------------|------------------------------------------|
-| GET    | `/health`                    | Liveness + whether the radio thread runs |
-| POST   | `/api/data/submit_reading`   | Manual insert (testing); rejects zeroed frames |
-| GET    | `/api/data/all_readings`     | Last 5000 readings, newest first          |
-
----
-
-## Dashboard features (added on this branch)
-
-- **Map** (Leaflet + OSM tiles) with one marker per filtered point; popup shows
-  timestamp, pH, oxygen.
-- **Four synchronized line charts**: pH, oxygen, temperature, conductivity.
-  Hovering on any chart highlights the same index across all four and opens
-  the corresponding map marker.
-- **Linear trend line** overlaid on each chart (least-squares over the filtered
-  window).
-- **Stat cards** per parameter: min / avg / max over the current filter.
-- **Flatpickr** date-time range filter (Polish locale, 24h). When no range is
-  set, the charts show the last 25 points and auto-refresh every 5 s.
-- **Zoom/pan** on charts via `chartjs-plugin-zoom` (mouse wheel + drag);
-  "Domyślny widok wykresu" resets all charts at once.
-- **CSV export** (semicolon-separated, UTF-8 BOM, comma decimal → opens
-  cleanly in Polish Excel).
-- **PNG export** stitches all four chart canvases vertically into one image.
-
----
 
 ## Notes for contributors
 
-- The radio thread is a `daemon=True` `threading.Thread` started from the
-  FastAPI lifespan; SQLite connections use `check_same_thread=False` so both
-  the radio thread and request handlers can write.
-- Checksum is **Adler-32** (matches the C++ sender); the older XOR
-  implementation was replaced in commit `b3a6ad9`.
-- Lat/Lon arrive as scaled integers and are divided by 1e7 in
-  `RadioService._process_data` (commit `ea1356e`) — don't scale again
-  downstream.
-- CORS is wide open (`allow_origins=["*"]`) for local development; tighten
-  before deploying.
+- **Frame parsing** dispatches by `TLM,` / `EVT,` prefix at the start
+  of the line. `EVT` details may contain commas (e.g.
+  `EVT,Cx,COLLECTED,lat=...,lon=...,utc=...`), so the parser splits on
+  the first three commas only and treats the rest as opaque details
+  for the kind-specific handler to parse. See `parse_kv` for the
+  `k1=v1,k2=v2` helper.
+- **Adler-32** matches the firmware's `zlib.adler32`. Reference
+  vectors in [`docs/protocol.md`](../docs/protocol.md) §3.
+- **Lat/Lon** arrive scaled by 10⁷ on the wire and are divided to
+  decimal degrees in `_handle_tlm` and `_handle_collected`. Don't
+  scale again downstream.
+- **SSE keepalive** — the stream emits an `event: ping` line every
+  15 s of silence so corporate proxies don't drop the connection.
+- **CORS** is wide open (`allow_origins=["*"]`) for local development;
+  tighten before deploying.

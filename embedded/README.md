@@ -1,145 +1,204 @@
 # Embedded firmware — H2O drone
 
-ESP32 firmware for the H2O water-sampling drone. Currently in **skeleton
-phase**: the command/event pipeline, state machines, and wire protocol
-are real and exercised end-to-end on hardware. Pumps, motors and sensors
-are mocked with timer-driven transitions; real hardware drivers slot in
-when the hardware team confirms the schematic interpretation (see
-`docs/hardware/pytania_do_hw.md`).
+ESP32-S3 firmware for the water-quality drone. The command/event
+pipeline, state machines, wire protocol, GPS, level sensors, pumps and
+the SC-09 servo bus are all live on hardware. The Elmetron probe and
+its H-bridge winch are still stubs (driver pending hardware
+integration — see [Mock vs real](#mock-vs-real)).
 
-## Quick orientation
+## Build envs at a glance
 
-```
-embedded/
-├── platformio.ini      build env(s)
-├── lib/                pure modules (testable in isolation)
-│   ├── FrameCodec/     wire-frame build/parse + Adler-32
-│   ├── Sampler/        per-tank state machine
-│   └── Clock/          time-source abstraction (Real + Test)
-├── include/            project headers (Arduino-touching)
-│   ├── MissionControl.h    top-level state + CMD dispatcher
-│   ├── RadioLink.h         bidirectional UART transport
-│   └── ...                 (legacy headers, unused for now)
-├── src/                project sources
-│   ├── main.cpp        thin glue: instantiates the system, ticks it
-│   ├── MissionControl.cpp
-│   ├── RadioLink.cpp
-│   └── ...             (legacy sources, unused for now)
-├── test/
-│   ├── test_frame_codec/   Unity tests for FrameCodec
-│   └── test_sampler/       Unity tests for Sampler FSM
-└── tools/
-    └── send_cmd.py     host helper: send a CMD frame, print replies
-```
+Pick the env that matches what you have in front of you. All envs are
+declared in [`platformio.ini`](platformio.ini).
 
-## Architecture in one paragraph
+| Env                       | Protocol link        | When to use                                                                                        |
+|---------------------------|----------------------|----------------------------------------------------------------------------------------------------|
+| `esp32s3wroom1`           | RFD868 radio @ 57600 | **Production deploy.** Full hardware: servos, pumps, level sensors, GPS, radio.                    |
+| `esp32s3wroom1-uartlink`  | CP210x USB @ 115200  | **Bench testing with real peripherals.** No radio in the loop. Pumps / sensors / GPS still live.   |
+| `esp32s3wroom1-mock`      | CP210x USB @ 115200  | **GCS development without any peripheral hardware.** Bare ESP32-S3, GPS+level sensor mocked.       |
+| `esp32s3wroom1-servotest` | none (JTAG only)     | Standalone SC-09 servo bring-up. UART0 dedicated to the servo bus.                                 |
+| `esp32s3wroom1-radiotest` | CP210x USB           | RFD868 TX/RX-orientation diagnostic. Rotates pin mapping every 5 s.                                |
+| `esp32doit-devkit-v1`     | CP210x USB           | Legacy classic ESP32 dev board. Same protocol/FSM, no S3-specific peripherals.                     |
 
-`main.cpp` instantiates a `Clock`, a `RadioLink` (over USB Serial in
-skeleton mode), and a `MissionControl`. The main loop pumps the radio
-(reads bytes, validates frames via `FrameCodec`, dispatches `CMD` frames
-to `MissionControl::handle_command`) and ticks `MissionControl` (which
-drives three `Sampler` FSMs and emits `EVT` frames for state/step
-changes). The wire protocol — every frame's structure, every command,
-every event — lives in `docs/protocol.md`. The mock timing for the
-sampling FSM lives in `Sampler.h::mock_timing`.
+## Flash / monitor
 
-## Build / flash / monitor
+If `pio` on your `$PATH` resolves to an old 4.x install, use the
+explicit modern path: `~/.platformio/penv/bin/pio`.
 
 ```bash
-# from embedded/
-pio run                             # build
-pio run -t upload                   # build + flash
-pio device monitor                  # open serial monitor (115200 baud)
+# Build only (sanity check)
+pio run -e esp32s3wroom1
+
+# Build + upload
+pio run -e esp32s3wroom1 -t upload
+
+# Serial monitor (CP210x adapter, 115200 baud)
+pio device monitor -p /dev/ttyUSB0 -b 115200
+
+# Radio listen (FTDI on the V5 radio, 57600 baud)
+pio device monitor -p /dev/ttyUSB1 -b 57600
 ```
 
-**Note for this machine:** there are two PlatformIO installs and `pio`
-on `$PATH` may resolve to a broken legacy 4.3.4. Use the modern one
-explicitly if needed:
+The deploy env (`esp32s3wroom1`) pins the upload port to the CP210x
+adapter via a stable `by-id` path so PIO can't accidentally try to
+flash through the FTDI radio adapter. Other envs that don't depend on
+this can use plain auto-detect.
+
+### If a flash hangs partway
+
+esptool's flasher stub has an internal watchdog that occasionally
+times out mid-write on this board/cable combo ("chip stopped
+responding"). All four S3 envs that you'd normally flash already pin
+`upload_flags = --no-stub` to bypass the stub. Flashing is slightly
+slower but rock-solid.
+
+If you still get a hang, manual bootloader entry: hold **BOOT**,
+press **EN**, release **EN**, release **BOOT**, then re-run the
+upload command.
+
+## Quick demo — flash the mock, drive from the host
+
+You don't need radio, pumps, sensors, GPS, or batteries for this.
+Just a spare ESP32-S3 board on your laptop USB.
 
 ```bash
-~/.platformio/penv/bin/pio run
+# 1. Flash the mock build
+pio run -e esp32s3wroom1-mock -t upload
+
+# 2. Watch the protocol stream live
+pio device monitor -p /dev/ttyUSB0 -b 115200
+# You should see EVT,SYS,BOOT,... once, then TLM frames every 500 ms.
+
+# 3. From another terminal, fire commands
+python3 tools/send_cmd.py -p /dev/ttyUSB0 -b 115200 STATUS
+python3 tools/send_cmd.py -p /dev/ttyUSB0 -b 115200 --watch 12 START_C1
+python3 tools/send_cmd.py -p /dev/ttyUSB0 -b 115200 --watch 25 START_ELMETRON
 ```
+
+A C1 sample cycle runs in ~7.5 s on mock timings, an Elmetron
+measurement cycle in ~20.5 s including HOMING. Both end with the
+appropriate STATE return (FULL for tanks; DOCKED for Elmetron) plus a
+geo-tagged `EVT,Cx,COLLECTED` if a tank reached FULL.
 
 ## Tests
 
-Tests run **on-target** — they compile, flash, and execute on the real
-ESP32. Each cycle is ~15–30 seconds. There is no host-side test runner
-(deliberately: keeps infrastructure minimal, and the tests stay honest
-about running on the same toolchain as the firmware).
+Unit tests run **on-target** — they compile, flash, and execute on a
+real ESP32. There's no host-side runner; the tests use the same
+toolchain and headers as the firmware.
 
 ```bash
-pio test -e esp32doit-devkit-v1                       # run all tests
-pio test -e esp32doit-devkit-v1 -f test_frame_codec   # one test target
+pio test -e esp32doit-devkit-v1                       # run all
+pio test -e esp32doit-devkit-v1 -f test_frame_codec   # one suite
+pio test -e esp32doit-devkit-v1 -f test_sampler
+pio test -e esp32doit-devkit-v1 -f test_elmetron
 ```
 
-Currently covered:
+Coverage today:
 
-- `test_frame_codec` — 21 cases. Adler-32 reference vectors, build/parse
-  roundtrip, every rejection path (bad checksum, missing star, oversized,
-  short input, non-hex). Source: `test/test_frame_codec/test_main.cpp`.
-- `test_sampler` — 17 cases. Every Sampler state transition,
-  abort/reset semantics, change-flag consumption, string names.
+| Suite             | Cases | What it exercises                                                                  |
+|-------------------|-------|------------------------------------------------------------------------------------|
+| `test_frame_codec`| 21    | Adler-32 reference vectors, frame build/parse roundtrip, every rejection path.     |
+| `test_sampler`    | 17    | Per-tank FSM transitions, abort/reset semantics, change-flag consumption.          |
+| `test_elmetron`   | 21    | Elmetron FSM transitions including HOMING, synthetic reading evolution, abort/reset. |
 
-When real hardware drivers land, add tests for any pure logic that can
-be exercised without GPIO (e.g. command parsing edge cases in
-MissionControl). Driver code itself is validated by the demo run, not
-by unit tests.
+## Architecture
 
-## Demo (no GCS needed)
-
-The skeleton is flashed and the board is connected. From this directory:
-
-```bash
-# Ask the drone its current state
-python3 tools/send_cmd.py STATUS
-
-# Sample tank C1 (~9 second cycle)
-python3 tools/send_cmd.py --watch 12 START_C1
-
-# Reset and try again
-python3 tools/send_cmd.py RESET_C1
-python3 tools/send_cmd.py --watch 12 START_C1
-
-# Trigger and recover from E-STOP
-python3 tools/send_cmd.py --watch 2 START_C1   # start sampling
-python3 tools/send_cmd.py E_STOP               # abort mid-sample
-python3 tools/send_cmd.py RESET_C1             # clear the fault
+```
+                 ┌────────────────────────────────────────────────┐
+                 │              main.cpp (composition root)        │
+                 │  instantiates Clock, RadioLink, MissionControl, │
+                 │  Telemetry, GpsLink, ServoBus, PumpControl,     │
+                 │  LevelSensor, BatteryMonitor, Elmetron.         │
+                 └─────────────────────┬───────────────────────────┘
+                                       ▼
+        ┌────────────────────────────────────────────────────────────┐
+        │                  MissionControl                            │
+        │  • Owns 3× Sampler FSMs (tanks) + 1× Elmetron FSM          │
+        │  • Dispatches CMD frames (handle_command)                  │
+        │  • Emits ACK/NACK/STATE/STEP/COLLECTED events              │
+        │  • Tracks system mode (IDLE / SAMPLING / MEASURING / E_STOP)│
+        │  • Drives servos, pumps, telemetry pushes                  │
+        └────────────────────────────────────────────────────────────┘
+              │                       │                  │
+              ▼                       ▼                  ▼
+    ┌────────────────────┐   ┌─────────────────┐   ┌───────────────────┐
+    │ Sampler ×3         │   │ Elmetron        │   │ Telemetry         │
+    │ EMPTY/SAMPLING/    │   │ DOCKED/MEAS/    │   │ TLM @ 2 Hz with   │
+    │ FULL/FAULT         │   │ FAULT           │   │ measurement_valid │
+    └────────────────────┘   └─────────────────┘   └───────────────────┘
+              │                       │                  ▲
+              ▼                       ▼                  │
+    ┌────────────────────┐   ┌─────────────────┐   ┌─────┴──────┐
+    │ ServoBus, Pump-    │   │ GpsLink (used   │   │ GpsLink    │
+    │ Control, Level-    │   │ for geo-tagging │   │ pushes lat/│
+    │ Sensor             │   │ collections)    │   │ lon/UTC    │
+    └────────────────────┘   └─────────────────┘   └────────────┘
 ```
 
-Every command and reply is a properly-checksummed protocol frame. See
-`docs/protocol.md` for the verb / kind catalogue.
+The wire protocol — every command, every event, every TLM field —
+lives in [`docs/protocol.md`](../docs/protocol.md).
 
-## What's mocked vs real
+## Module reference
 
-| Module           | Skeleton state                                | Real-hardware swap-in plan        |
-|------------------|-----------------------------------------------|-----------------------------------|
-| FrameCodec       | Real — final implementation                   | No change                         |
-| RadioLink        | Real on USB Serial                            | Swap to `Serial1` (or HW UART) wired to RFD module |
-| MissionControl   | Real — full state machine + CMD dispatch      | No change                         |
-| Sampler          | Real FSM, **timer-driven step transitions**   | Step transitions become sensor-driven (`SUBx`, `TOPCNx`, `LIMx`); pump/winch actuation calls land in `enter_step()` |
-| Clock            | Real (`millis()`)                             | No change                         |
-| Telemetry        | Real broadcast path, **zeroed sample data**   | `Telemetry::update(Sample)` called by sensor + GPS modules with real readings; broadcast path unchanged |
-| Elmetron, GPS    | Not wired yet                                 | New modules emit STATE/STEP/ERROR events via the same protocol; data flows into Telemetry::update() |
+```
+embedded/
+├── platformio.ini      build envs (see table above)
+├── lib/                pure modules — testable in isolation
+│   ├── Clock/          time-source abstraction (Real + Test)
+│   ├── FrameCodec/     wire-frame build/parse + Adler-32
+│   ├── Sampler/        per-tank state machine (one instance per Cx)
+│   └── Elmetron/       measurement-side state machine (one instance)
+├── include/            project headers
+│   ├── MissionControl.h    top-level state + CMD dispatcher
+│   ├── Telemetry.h         2 Hz TLM broadcaster (10 fields incl. measurement_valid)
+│   ├── RadioLink.h         framed bidirectional UART transport
+│   ├── ServoBus.h          SC-09 half-duplex bus (1 Mbps on UART0)
+│   ├── PumpControl.h       three on/off pump GPIOs
+│   ├── LevelSensor.h       FS-IR12 optical "tank full" sensors
+│   ├── BatteryMonitor.h    3S LiPo voltage + soft-power latch shutdown
+│   ├── GpsLink.h           NEO-M8U over I2C
+│   └── RadioTransport.h    RFD868 link bring-up
+├── src/                project sources (mostly thin glue around the headers)
+└── tools/
+    ├── send_cmd.py     host helper: send a CMD frame, wait for ACK
+    ├── watch_adc.py
+    └── watch_battery.py
+```
 
-Reference implementations from the previous semester live in `legacy/`
-(separate tree, not compiled). See `legacy/README.md` for what's in
-there and how to fold each module back in.
+## Mock vs real
 
-## Skeleton scope and known limitations
+| Module           | Today                                                     | Real-hardware swap-in plan                        |
+|------------------|-----------------------------------------------------------|---------------------------------------------------|
+| FrameCodec       | Real                                                      | —                                                 |
+| RadioLink        | Real on Serial1 (RFD868) or Serial (CP210x bench)         | —                                                 |
+| MissionControl   | Real                                                      | —                                                 |
+| Sampler          | Real; PUMPING exits on level sensor (sensor-driven) or hard 90 s timeout. DESCENDING/ASCENDING/HOME still timer-based until LIM1/2/3 switches are wired. | LIM1/2/3 wired into per-step exit conditions.    |
+| ServoBus         | Real for tank winches (SC-09 on UART0)                    | —                                                 |
+| PumpControl      | Real                                                      | —                                                 |
+| LevelSensor      | Real (post-rework: external pull-up to 3.3 V)             | —                                                 |
+| BatteryMonitor   | Real but **temporarily disabled in deploy env** (`-DDISABLE_BATTERY_MONITOR` in `platformio.ini`) because R18/R19 divider saturates the ADC above ~9 V. | Once HW team confirms divider rework, drop the flag and restore the 11.0 V / 10.5 V thresholds in `BatteryMonitor.h`. |
+| GpsLink          | Real (u-blox NEO-M8U over I2C). Mock build synthesizes a fixed fix near Warsaw. | —                                       |
+| Telemetry        | Real (probe fields zero outside MEASURING)                | —                                                 |
+| Elmetron probe   | Synthetic ramp readings (no probe driver yet)             | Add real UART driver on ELE_TX (IO18) / ELE_RX (IO17). Cond reading can drive descent-trigger logic (see `project_elmetron_descent_timeout`). |
+| Elmetron winch   | FSM transitions but motor isn't driven                    | WinchH driver: H_EN_L/H_EN_R direction, H_PWM speed, H_LIMIT for HOMING exit. TODOs documented in `drive_elmetron_servo_for_step`. |
 
-- **Single UART used for both directions.** In skeleton mode the USB
-  Serial port handles both incoming CMDs and outgoing TLM/EVT. When the
-  RFD module is wired up, swap to a dedicated UART (`Serial1` or
-  `Serial2`) at 57600 baud — see the note at the top of `main.cpp`.
-- **TLM carries zeros until sensors land.** The 2 Hz TLM broadcast is
-  wired up and continuously firing; sensor and GPS fields are zeroed,
-  which the GCS already interprets as "sensor not ready" per the
-  protocol. The path is real — only the data source is a stub.
-- **Single writer, no mutex.** The main loop is the only producer of
-  outgoing frames today. When tasks land that emit frames concurrently
-  (e.g. a FreeRTOS sensor task), wrap `RadioLink::send()` in a mutex to
-  prevent byte-interleaving on the wire — see protocol-robustness notes
-  in `docs/protocol.md`.
-- **Mock step timings are arbitrary.** `Sampler.h::mock_timing` gives
-  a ~9-second cycle; pick whatever feels good for testing. With real
-  sensors, timings disappear entirely (transitions fire on sensor input).
+## Known hardware caveats
+
+- **SC-09 half-duplex echo.** The library reads its own TX echo on RX,
+  so `Ack()` returns are unreliable for write/read operations.
+  `ServoBus::move()` is fire-and-forget; `ServoBus::read_position()`
+  may return garbage. Verify servo writes by observing motion, not by
+  return code. See the comment block above `set_id` in `ServoBus.cpp`.
+- **Battery divider saturates above ~9 V.** Effective ratio is ~0.35,
+  not the schematic's 0.248. Until HW team reworks R18/R19, the deploy
+  env disables BatteryMonitor entirely.
+- **GPIO 4 is the soft-power latch.** Firmware must drive it HIGH
+  within the first few ms after boot or the board powers itself off.
+  `early_board_init()` in `main.cpp` does this — keep it at the top of
+  every S3 build's `setup()`.
+- **UART0 pin swap for the SC-09 bus.** TX = GPIO 44, RX = GPIO 43
+  (opposite of the chip default). See
+  [`docs/hardware/servo_uart_pinout.md`](../docs/hardware/servo_uart_pinout.md).
+- **Bench env saturates the battery ADC on USB power.** `-uartlink`
+  and `-mock` builds skip BatteryMonitor entirely — USB on the ADC
+  pin would trip CRITICAL and drop the power latch.
