@@ -8,119 +8,251 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
     
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f0f2f5; }
-        h1 { color: #1a1a1a; text-align: center; margin-bottom: 20px; }
-        
-        #controls { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 20px; text-align: center; }
-        .filter-group { display: inline-block; margin: 0 15px; text-align: left; }
-        .filter-group label { display: block; font-size: 0.85em; color: #666; margin-bottom: 5px; font-weight: bold; }
-        
-        input.datetime-input { 
-            padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; width: 180px; background-color: #fff; cursor: pointer;
+        /* ---------- single-screen layout ---------- */
+        html, body { height: 100%; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0; padding: 8px;
+            background-color: #f0f2f5; color: #1a1a1a;
+            display: flex; flex-direction: column; gap: 8px;
+            overflow: hidden;
         }
+        #topbar { background: white; border-radius: 10px; padding: 8px 14px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            display: flex; align-items: center; gap: 12px; }
+        #topbar h1 { margin: 0; font-size: 1.05em; color: #1a1a1a; white-space: nowrap; }
+        #op-indicators { display: flex; gap: 8px; flex: 1; justify-content: center;
+            flex-wrap: wrap; }
 
-        #stats-container { display: flex; justify-content: space-between; gap: 15px; margin-bottom: 20px; }
-        .stat-card { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); flex: 1; text-align: center; border-top: 4px solid #007bff; }
-        .stat-card h4 { margin: 0 0 10px 0; color: #555; font-size: 0.9em; text-transform: uppercase; }
-        .stat-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px; }
-        .stat-item { font-size: 0.85em; }
-        .stat-label { color: #888; display: block; }
-        .stat-value { font-weight: bold; color: #1a1a1a; font-size: 1.1em; }
-        
-        /* Kolory kafelków */
-        .color-ph { border-top-color: #4bc0c0; }     /* Turkus */
-        .color-oxy { border-top-color: #36a2eb; }    /* Niebieski - NOWY */
-        .color-temp { border-top-color: #ff6384; }   /* Czerwony */
-        .color-cond { border-top-color: #ffce56; }   /* Żółty */
+        #main-grid { flex: 1; min-height: 0;
+            display: grid; grid-template-columns: 360px 1fr; gap: 8px; }
+        #col-operator { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+        #col-data { display: grid; gap: 8px; min-height: 0;
+            grid-template-rows: auto 1fr 1fr; }
 
-        /* Zwiększona wysokość kontenera, żeby pomieścić 4 wykresy */
-        #visualization-container { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 20px; height: 800px; }
-        #map-container { height: 100%; width: 48%; border-radius: 12px; border: 1px solid #ddd; background: white; z-index: 1; }
-        #chart-container { width: 48%; display: flex; flex-direction: column; gap: 15px; overflow-y: auto; padding-right: 10px; }
-        .chart-box { min-height: 250px; background: white; border-radius: 12px; border: 1px solid #ddd; padding: 15px; flex-shrink: 0; }
-        canvas { cursor: crosshair; }
+        /* ---------- top bar bits ---------- */
+        .sys-badge { padding: 8px 16px; border-radius: 6px; font-weight: 700;
+            font-size: 0.95em; letter-spacing: 0.3px; white-space: nowrap; }
+        .sys-IDLE      { background: #e9ecef; color: #495057; }
+        .sys-SAMPLING  { background: #cfe2ff; color: #084298; }
+        .sys-MEASURING { background: #d1e7dd; color: #0a3622; }
+        .sys-E_STOP    { background: #f8d7da; color: #842029; }
+        .sys-UNKNOWN   { background: #fff3cd; color: #664d03; }
+        .indicator { padding: 5px 10px; border-radius: 5px; background: #f1f3f5;
+            font-size: 0.82em; color: #333; font-variant-numeric: tabular-nums;
+            white-space: nowrap; }
+        .indicator.warn { background: #fff3cd; color: #664d03; }
+        .indicator.bad  { background: #f8d7da; color: #842029; }
+        .indicator.ok   { background: #d1e7dd; color: #0a3622; }
+        .btn-estop { background: #dc3545; color: white; border: none; border-radius: 6px;
+            padding: 9px 20px; font-weight: 800; font-size: 0.95em; cursor: pointer;
+            box-shadow: 0 2px 4px rgba(220,53,69,0.3); white-space: nowrap; }
+        .btn-estop:hover { background: #b02a37; }
 
-        #data-container { background: white; border: 1px solid #ddd; padding: 20px; border-radius: 12px; max-height: 300px; overflow-y: auto; }
-        .reading-item { border-bottom: 1px solid #eee; padding: 12px 0; font-size: 0.9em; }
-        
-        button { padding: 10px 20px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 6px; font-weight: 600; transition: 0.2s; }
+        /* ---------- operator column ---------- */
+        .op-card { background: white; border-radius: 8px; padding: 10px 12px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.04);
+            display: grid; grid-template-columns: 1fr auto;
+            grid-template-areas:
+                "title  buttons"
+                "state  buttons"
+                "step   buttons"
+                "extras extras";
+            column-gap: 12px; row-gap: 4px; align-items: center; }
+        .card-state-row { grid-area: state; display: flex; gap: 6px;
+            align-items: center; }
+        .card-level { font-size: 0.72em; padding: 2px 7px; border-radius: 3px;
+            font-weight: 700; letter-spacing: 0.4px; }
+        .card-level.lvl-unknown { background: #fff3cd; color: #664d03; }
+        .card-level.lvl-wet     { background: #d1e7dd; color: #0a3622; }
+        .card-level.lvl-dry     { background: #e9ecef; color: #495057; }
+        .op-card.has-readings { grid-template-areas:
+                "title  buttons"
+                "state  buttons"
+                "step   buttons"
+                "extras extras"; }
+        .op-card h3 { margin: 0; font-size: 0.95em; grid-area: title; }
+        .card-state { font-weight: 700; padding: 3px 8px; border-radius: 4px;
+            font-size: 0.78em; }
+        .st-EMPTY, .st-DOCKED { background: #e9ecef; color: #495057; }
+        .st-SAMPLING, .st-MEASURING { background: #d1e7dd; color: #0a3622; }
+        .st-FULL  { background: #cfe2ff; color: #084298; }
+        .st-FAULT { background: #f8d7da; color: #842029; }
+        .st-UNKNOWN { background: #fff3cd; color: #664d03; }
+        .card-step { color: #666; font-size: 0.8em; min-height: 0.9em;
+            font-variant-numeric: tabular-nums; grid-area: step; }
+        .card-buttons { display: flex; flex-direction: column; gap: 4px;
+            grid-area: buttons; align-self: center; }
+        .card-buttons button { padding: 6px 12px; font-size: 0.82em;
+            min-width: 70px; }
+        .btn-start { background: #0d6efd; }
+        .btn-start:hover { background: #0b5ed7; }
+        .btn-start:disabled { background: #adb5bd; cursor: not-allowed; }
+        .btn-stop  { background: #dc3545; }
+        .btn-stop:hover  { background: #b02a37; }
+        .btn-stop:disabled  { background: #adb5bd; cursor: not-allowed; }
+        .btn-reset { background: #fd7e14; }
+        .btn-reset:hover { background: #e8590c; }
+        .btn-reset:disabled { background: #adb5bd; cursor: not-allowed; }
+        .card-readings { grid-area: extras; font-size: 0.78em; color: #444;
+            font-variant-numeric: tabular-nums; line-height: 1.45;
+            border-top: 1px dashed #dee2e6; padding-top: 6px; margin-top: 2px; }
+        .card-readings.invalid { color: #adb5bd; }
+        .valid-dot { display: inline-block; width: 8px; height: 8px;
+            border-radius: 50%; vertical-align: middle; margin-left: 4px; }
+        .valid-dot.on  { background: #28a745; }
+        .valid-dot.off { background: #adb5bd; }
+
+        #op-log { flex: 1; min-height: 100px;
+            background: #1e1e1e; color: #d4d4d4; border-radius: 8px; padding: 10px;
+            overflow-y: auto;
+            font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 0.78em;
+            line-height: 1.45; }
+        #op-log .log-line { white-space: pre-wrap; word-break: break-all; }
+        #op-log .log-time { color: #6a9955; }
+        #op-log .log-evt  { color: #569cd6; }
+        #op-log .log-ack  { color: #4ec9b0; }
+        #op-log .log-nack, #op-log .log-error { color: #f48771; }
+
+        /* ---------- data column ---------- */
+        #data-toolbar { background: white; padding: 6px 10px; border-radius: 8px;
+            display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+            font-size: 0.85em; box-shadow: 0 2px 4px rgba(0,0,0,0.04); }
+        #data-toolbar label { color: #666; font-size: 0.85em; }
+        input.datetime-input { padding: 5px 8px; border: 1px solid #ccc;
+            border-radius: 5px; font-size: 0.85em; width: 140px; background: #fff;
+            cursor: pointer; }
+        #data-toolbar button { padding: 6px 12px; font-size: 0.82em; }
+        #data-toolbar .toolbar-sep { flex: 1; }
+
+        button { padding: 7px 14px; cursor: pointer; background: #007bff;
+            color: white; border: none; border-radius: 5px; font-weight: 600;
+            transition: 0.2s; font-size: 0.85em; }
         button:hover { background: #0056b3; }
-        .btn-secondary { background: #6c757d; margin-left: 5px; }
-        .btn-warning { background: #fd7e14; margin-left: 5px; }
-        
-        .export-group { margin-top: 15px; border-top: 1px solid #eee; padding-top: 15px; }
-        .btn-export { background: #28a745; margin: 0 5px; }
+        .btn-secondary { background: #6c757d; }
+        .btn-secondary:hover { background: #5a6268; }
+        .btn-warning { background: #fd7e14; }
+        .btn-warning:hover { background: #e8590c; }
+        .btn-export { background: #28a745; }
         .btn-export:hover { background: #218838; }
+
+        #map-container { border-radius: 10px; background: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.04); min-height: 0; z-index: 1; }
+        #chart-grid { display: grid; grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr 1fr; gap: 8px; min-height: 0; }
+        .chart-box { background: white; border-radius: 10px; padding: 6px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.04);
+            min-height: 0; min-width: 0; position: relative; }
+        .chart-box canvas { cursor: crosshair; }
+
+        /* Stat cards + history list kept in DOM for JS but visually hidden;
+           future "valid only" filter / stats popover can re-show them. */
+        #stats-container, #data-container { display: none; }
     </style>
 </head>
 <body>
-    <h1>Monitor Jakości Wody</h1>
-    
-    <div id="controls">
-        <div class="filter-group">
-            <label>Od (Początek):</label>
-            <input type="text" id="time-start" class="datetime-input" placeholder="Wybierz datę i czas">
+    <header id="topbar">
+        <h1>Drone Mission Control</h1>
+        <div id="op-sys-badge" class="sys-badge sys-UNKNOWN">SYSTEM: UNKNOWN</div>
+        <div id="op-indicators">
+            <span id="op-link" class="indicator warn">LINK: ...</span>
+            <span id="op-battery" class="indicator">BAT: --</span>
+            <span id="op-fw" class="indicator">FW: --</span>
+            <span id="op-gps" class="indicator">GPS: --</span>
         </div>
-        <div class="filter-group">
-            <label>Do (Koniec):</label>
-            <input type="text" id="time-end" class="datetime-input" placeholder="Wybierz datę i czas">
-        </div>
-        <button onclick="fetchData()">Filtruj Dane</button>
-        <button onclick="resetFilters()" class="btn-secondary">Reset filtra</button>
-        <button onclick="resetZoom()" class="btn-warning">Domyślny widok wykresu</button>
+        <button id="btn-estop" class="btn-estop" onclick="sendCmd('E_STOP')">E-STOP</button>
+    </header>
 
-        <div class="export-group">
-            <button onclick="downloadCSV()" class="btn-export">Pobierz CSV (Excel)</button>
-            <button onclick="exportChartsToImage()" class="btn-export">Zapisz wykresy jako obraz</button>
-        </div>
-    </div>
+    <main id="main-grid">
+        <aside id="col-operator">
+            <div class="op-card" data-tank="C1">
+                <h3>Tank C1</h3>
+                <div class="card-state-row">
+                    <div class="card-state st-UNKNOWN">UNKNOWN</div>
+                    <div class="card-level lvl-unknown" title="Last level-sensor reading">—</div>
+                </div>
+                <div class="card-step"></div>
+                <div class="card-buttons">
+                    <button class="btn-start" onclick="sendCmd('START_C1')">Start</button>
+                    <button class="btn-stop"  onclick="sendCmd('STOP_C1')"  disabled>Stop</button>
+                    <button class="btn-reset" onclick="sendCmd('RESET_C1')" disabled>Reset</button>
+                </div>
+            </div>
+            <div class="op-card" data-tank="C2">
+                <h3>Tank C2</h3>
+                <div class="card-state-row">
+                    <div class="card-state st-UNKNOWN">UNKNOWN</div>
+                    <div class="card-level lvl-unknown" title="Last level-sensor reading">—</div>
+                </div>
+                <div class="card-step"></div>
+                <div class="card-buttons">
+                    <button class="btn-start" onclick="sendCmd('START_C2')">Start</button>
+                    <button class="btn-stop"  onclick="sendCmd('STOP_C2')"  disabled>Stop</button>
+                    <button class="btn-reset" onclick="sendCmd('RESET_C2')" disabled>Reset</button>
+                </div>
+            </div>
+            <div class="op-card" data-tank="C3">
+                <h3>Tank C3</h3>
+                <div class="card-state-row">
+                    <div class="card-state st-UNKNOWN">UNKNOWN</div>
+                    <div class="card-level lvl-unknown" title="Last level-sensor reading">—</div>
+                </div>
+                <div class="card-step"></div>
+                <div class="card-buttons">
+                    <button class="btn-start" onclick="sendCmd('START_C3')">Start</button>
+                    <button class="btn-stop"  onclick="sendCmd('STOP_C3')"  disabled>Stop</button>
+                    <button class="btn-reset" onclick="sendCmd('RESET_C3')" disabled>Reset</button>
+                </div>
+            </div>
+            <div class="op-card has-readings" id="card-elmetron">
+                <h3>Elmetron</h3>
+                <div class="card-state st-UNKNOWN">UNKNOWN</div>
+                <div class="card-step"></div>
+                <div class="card-buttons">
+                    <button class="btn-start" onclick="sendCmd('START_ELMETRON')">Start</button>
+                    <button class="btn-stop"  onclick="sendCmd('STOP_ELMETRON')"  disabled>Stop</button>
+                    <button class="btn-reset" onclick="sendCmd('RESET_ELMETRON')" disabled>Reset</button>
+                </div>
+                <div class="card-readings invalid">
+                    cond: --  &nbsp; temp: --<br>
+                    pH&nbsp;&nbsp;: --  &nbsp; O₂&nbsp;&nbsp; : --
+                    <span class="valid-dot off" title="measurement_valid"></span>
+                </div>
+            </div>
+            <div id="op-log" title="Live event log (most recent at the top)"></div>
+        </aside>
 
+        <section id="col-data">
+            <div id="data-toolbar">
+                <label for="time-start">From:</label>
+                <input type="text" id="time-start" class="datetime-input" placeholder="Date / time">
+                <label for="time-end">To:</label>
+                <input type="text" id="time-end" class="datetime-input" placeholder="Date / time">
+                <button onclick="fetchData()">Filter</button>
+                <button onclick="resetFilters()" class="btn-secondary">Clear</button>
+                <button onclick="resetZoom()" class="btn-warning">Reset zoom</button>
+                <span class="toolbar-sep"></span>
+                <button onclick="downloadCSV()" class="btn-export">CSV</button>
+                <button onclick="exportChartsToImage()" class="btn-export">PNG</button>
+            </div>
+            <div id="map-container">Map loading…</div>
+            <div id="chart-grid">
+                <div class="chart-box"><canvas id="phChart"></canvas></div>
+                <div class="chart-box"><canvas id="oxyChart"></canvas></div>
+                <div class="chart-box"><canvas id="tempChart"></canvas></div>
+                <div class="chart-box"><canvas id="condChart"></canvas></div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Kept in DOM (and hidden) so updateStatistics/fetchData JS keeps
+         working unchanged. Resurface inside a chart popover later. -->
     <div id="stats-container">
-        <div class="stat-card color-ph">
-            <h4>Statystyki pH</h4>
-            <div class="stat-grid">
-                <div class="stat-item"><span class="stat-label">Min</span><span class="stat-value" id="ph-min">-</span></div>
-                <div class="stat-item"><span class="stat-label">Śr</span><span class="stat-value" id="ph-avg">-</span></div>
-                <div class="stat-item"><span class="stat-label">Max</span><span class="stat-value" id="ph-max">-</span></div>
-            </div>
-        </div>
-        <div class="stat-card color-oxy">
-            <h4>Tlen (mg/L)</h4>
-            <div class="stat-grid">
-                <div class="stat-item"><span class="stat-label">Min</span><span class="stat-value" id="oxy-min">-</span></div>
-                <div class="stat-item"><span class="stat-label">Śr</span><span class="stat-value" id="oxy-avg">-</span></div>
-                <div class="stat-item"><span class="stat-label">Max</span><span class="stat-value" id="oxy-max">-</span></div>
-            </div>
-        </div>
-        <div class="stat-card color-temp">
-            <h4>Temperatura (°C)</h4>
-            <div class="stat-grid">
-                <div class="stat-item"><span class="stat-label">Min</span><span class="stat-value" id="temp-min">-</span></div>
-                <div class="stat-item"><span class="stat-label">Śr</span><span class="stat-value" id="temp-avg">-</span></div>
-                <div class="stat-item"><span class="stat-label">Max</span><span class="stat-value" id="temp-max">-</span></div>
-            </div>
-        </div>
-        <div class="stat-card color-cond">
-            <h4>Przewodność (µS)</h4>
-            <div class="stat-grid">
-                <div class="stat-item"><span class="stat-label">Min</span><span class="stat-value" id="cond-min">-</span></div>
-                <div class="stat-item"><span class="stat-label">Śr</span><span class="stat-value" id="cond-avg">-</span></div>
-                <div class="stat-item"><span class="stat-label">Max</span><span class="stat-value" id="cond-max">-</span></div>
-            </div>
-        </div>
+        <div class="stat-card"><span id="ph-min">-</span><span id="ph-avg">-</span><span id="ph-max">-</span></div>
+        <div class="stat-card"><span id="oxy-min">-</span><span id="oxy-avg">-</span><span id="oxy-max">-</span></div>
+        <div class="stat-card"><span id="temp-min">-</span><span id="temp-avg">-</span><span id="temp-max">-</span></div>
+        <div class="stat-card"><span id="cond-min">-</span><span id="cond-avg">-</span><span id="cond-max">-</span></div>
     </div>
-
-    <div id="visualization-container">
-        <div id="map-container">Mapa ładowanie...</div>
-        <div id="chart-container">
-            <div class="chart-box"><canvas id="phChart"></canvas></div>
-            <div class="chart-box"><canvas id="oxyChart"></canvas></div>
-            <div class="chart-box"><canvas id="tempChart"></canvas></div>
-            <div class="chart-box"><canvas id="condChart"></canvas></div>
-        </div>
-    </div>
-    
-    <div id="data-container">Ładowanie pomiarów...</div>
+    <div id="data-container"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script> 
@@ -128,11 +260,346 @@
     <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
     <script src="https://npmcdn.com/flatpickr/dist/l10n/pl.js"></script>
 
-    <script>        
+    <script>
+        // ================== Operator panel (SSE-driven) ==================
+        // Live state mirrors the radio service's LiveState snapshot. The
+        // SSE stream sends one of these event types on every tick:
+        //   {type:"snapshot", state:{...}}       — initial sync on connect
+        //   {type:"evt",  source, kind, details} — every EVT,*,* frame
+        //   {type:"tlm",  received_at, system_mode, tlm:{...}} — every TLM
+        // We re-derive UI state on each event so order doesn't matter.
+
+        const opState = {
+            system_mode: "UNKNOWN",
+            tanks: { C1: {state:"UNKNOWN", step:"NONE"},
+                     C2: {state:"UNKNOWN", step:"NONE"},
+                     C3: {state:"UNKNOWN", step:"NONE"} },
+            tank_levels: { C1: {full:null, raw:null}, C2: {full:null, raw:null},
+                           C3: {full:null, raw:null} },
+            elmetron: { state:"UNKNOWN", step:"NONE" },
+            firmware_version: null,
+            last_tlm: null,
+            last_tlm_at: null,
+            last_battery_volts: null,
+            last_gps: {},
+            last_tlm_local_ts: 0,   // browser monotonic clock for staleness
+        };
+
+        function setBadgeClass(el, prefix, value) {
+            // Strip any old "<prefix>-X" classes and apply the new one.
+            el.classList.forEach(c => { if (c.startsWith(prefix + "-")) el.classList.remove(c); });
+            el.classList.add(prefix + "-" + value);
+        }
+
+        function renderOpState() {
+            // System mode badge
+            const badge = document.getElementById("op-sys-badge");
+            badge.textContent = "SYSTEM: " + opState.system_mode;
+            setBadgeClass(badge, "sys", opState.system_mode);
+
+            // Indicators
+            const fwEl = document.getElementById("op-fw");
+            fwEl.textContent = "FW: " + (opState.firmware_version || "--");
+
+            const batEl = document.getElementById("op-battery");
+            batEl.textContent = "BAT: " + (opState.last_battery_volts != null
+                ? opState.last_battery_volts.toFixed(2) + " V" : "--");
+
+            const gpsEl = document.getElementById("op-gps");
+            const g = opState.last_gps;
+            if (g && g.fix === "1") {
+                gpsEl.textContent = `GPS: fix sats=${g.sats || "?"}`;
+                gpsEl.className = "indicator ok";
+            } else if (g && g.sats) {
+                gpsEl.textContent = `GPS: no fix (sats=${g.sats})`;
+                gpsEl.className = "indicator warn";
+            } else {
+                gpsEl.textContent = "GPS: --";
+                gpsEl.className = "indicator";
+            }
+
+            // Tank cards
+            const busy = opState.system_mode === "SAMPLING"
+                      || opState.system_mode === "MEASURING"
+                      || opState.system_mode === "E_STOP";
+            for (const tank of ["C1","C2","C3"]) {
+                const card = document.querySelector(`.op-card[data-tank="${tank}"]`);
+                if (!card) continue;
+                const t = opState.tanks[tank];
+                const stateEl = card.querySelector(".card-state");
+                stateEl.textContent = t.state;
+                setBadgeClass(stateEl, "st", t.state);
+                card.querySelector(".card-step").textContent =
+                    (t.step && t.step !== "NONE") ? "step: " + t.step : "";
+                // Live level pill (raw water-sensor read from periodic poll).
+                const levelEl = card.querySelector(".card-level");
+                const lvl = opState.tank_levels[tank];
+                if (!lvl || lvl.full == null) {
+                    levelEl.textContent = "—";
+                    levelEl.className = "card-level lvl-unknown";
+                    levelEl.title = "Level sensor not yet read";
+                } else {
+                    levelEl.textContent = lvl.full ? "WET" : "DRY";
+                    levelEl.className = "card-level " + (lvl.full ? "lvl-wet" : "lvl-dry");
+                    levelEl.title = `raw=${lvl.raw ? 1 : 0}, full=${lvl.full ? 1 : 0}`;
+                }
+                const startBtn = card.querySelector(".btn-start");
+                const stopBtn  = card.querySelector(".btn-stop");
+                const resetBtn = card.querySelector(".btn-reset");
+                // Disable Start when busy or tank can't be started.
+                startBtn.disabled = busy
+                    || t.state === "SAMPLING"
+                    || t.state === "FULL"
+                    || t.state === "FAULT";
+                // Stop is the per-subsystem abort — only meaningful
+                // while the tank is actively sampling.
+                stopBtn.disabled = t.state !== "SAMPLING";
+                // Reset is only meaningful from FAULT (or FULL between cycles).
+                resetBtn.disabled = !(t.state === "FAULT" || t.state === "FULL");
+            }
+
+            // Elmetron card
+            const ec = document.getElementById("card-elmetron");
+            const eState = ec.querySelector(".card-state");
+            eState.textContent = opState.elmetron.state;
+            setBadgeClass(eState, "st", opState.elmetron.state);
+            ec.querySelector(".card-step").textContent =
+                (opState.elmetron.step && opState.elmetron.step !== "NONE")
+                    ? "step: " + opState.elmetron.step : "";
+            const elStartBtn = ec.querySelector(".btn-start");
+            const elStopBtn  = ec.querySelector(".btn-stop");
+            const elResetBtn = ec.querySelector(".btn-reset");
+            elStartBtn.disabled = busy
+                || opState.elmetron.state === "MEASURING"
+                || opState.elmetron.state === "FAULT";
+            elStopBtn.disabled  = opState.elmetron.state !== "MEASURING";
+            elResetBtn.disabled = opState.elmetron.state !== "FAULT";
+
+            // Live probe readings (only meaningful inside MEASURING)
+            const tlm = opState.last_tlm;
+            const readings = ec.querySelector(".card-readings");
+            const dot = readings.querySelector(".valid-dot");
+            if (tlm && opState.system_mode === "MEASURING") {
+                readings.classList.toggle("invalid", !tlm.measurement_valid);
+                readings.innerHTML =
+                    `cond: ${tlm.cond.toFixed(2)} µS  &nbsp; temp: ${tlm.temp.toFixed(2)}°C<br>` +
+                    `pH&nbsp;&nbsp;: ${tlm.ph.toFixed(2)}  &nbsp; O₂&nbsp;&nbsp; : ${tlm.oxygen.toFixed(2)} mg/L` +
+                    `<span class="valid-dot ${tlm.measurement_valid ? "on" : "off"}" title="measurement_valid"></span>`;
+            } else {
+                readings.classList.add("invalid");
+                readings.innerHTML =
+                    "cond: --  &nbsp; temp: --<br>" +
+                    "pH&nbsp;&nbsp;: --  &nbsp; O₂&nbsp;&nbsp; : --" +
+                    `<span class="valid-dot off"></span>`;
+            }
+        }
+
+        function updateLinkIndicator() {
+            const el = document.getElementById("op-link");
+            const since = Date.now() - opState.last_tlm_local_ts;
+            if (!opState.last_tlm_local_ts) {
+                el.textContent = "LINK: waiting"; el.className = "indicator warn";
+            } else if (since > 2500) {
+                el.textContent = `LINK: stale ${Math.floor(since/1000)}s`;
+                el.className = "indicator bad";
+            } else {
+                el.textContent = `LINK: ok (${(since/1000).toFixed(1)}s)`;
+                el.className = "indicator ok";
+            }
+        }
+        setInterval(updateLinkIndicator, 500);
+
+        // ---- Event log ----
+        function appendLog(line, cls) {
+            const log = document.getElementById("op-log");
+            const div = document.createElement("div");
+            div.className = "log-line";
+            const t = new Date().toLocaleTimeString("en-GB", { hour12: false });
+            div.innerHTML =
+                `<span class="log-time">${t}</span> ` +
+                `<span class="${cls || "log-evt"}">${line.replace(/[<>]/g, c => c === "<" ? "&lt;" : "&gt;")}</span>`;
+            log.insertBefore(div, log.firstChild);
+            // Cap to a manageable scrollback.
+            while (log.children.length > 200) log.removeChild(log.lastChild);
+        }
+
+        // ---- CMD send ----
+        async function sendCmd(verb, args) {
+            const url = "/api/cmd/" + encodeURIComponent(verb)
+                      + (args && args.length ? "?args=" + encodeURIComponent(args.join(",")) : "");
+            appendLog(`→ CMD,${verb}${args ? "," + args.join(",") : ""}`, "log-evt");
+            try {
+                const res = await fetch(url, { method: "POST" });
+                if (!res.ok) {
+                    appendLog(`CMD ${verb} HTTP ${res.status}`, "log-error");
+                }
+            } catch (e) {
+                appendLog(`CMD ${verb} failed: ${e}`, "log-error");
+            }
+        }
+
+        // ---- SSE consumer ----
+        function applySnapshot(s) {
+            opState.system_mode      = s.system_mode || "UNKNOWN";
+            opState.tanks            = s.tanks || opState.tanks;
+            opState.tank_levels      = s.tank_levels || opState.tank_levels;
+            opState.elmetron         = s.elmetron || opState.elmetron;
+            opState.firmware_version = s.firmware_version || null;
+            opState.last_tlm         = s.last_tlm || null;
+            opState.last_battery_volts = s.last_battery_volts;
+            opState.last_gps         = s.last_gps || {};
+            if (s.last_tlm_at) {
+                // We can't know the actual age across the snapshot; treat as fresh
+                opState.last_tlm_local_ts = Date.now();
+            }
+            renderOpState();
+        }
+
+        function applyEvt(source, kind, details) {
+            // Mirror radio.py's state update so we don't depend on
+            // snapshots arriving in lockstep with the live UI.
+            if (source === "SYS" && kind === "STATE") {
+                opState.system_mode = details;
+            } else if (["C1","C2","C3"].includes(source)) {
+                if (kind === "STATE") opState.tanks[source].state = details;
+                if (kind === "STEP")  opState.tanks[source].step  = details;
+                if (kind === "COLLECTED") {
+                    // EVT,Cx,COLLECTED,valid=1,fix=1,lat=...,lon=...,utc=...
+                    const kv = {};
+                    details.split(",").forEach(p => {
+                        const i = p.indexOf("=");
+                        if (i > 0) kv[p.slice(0, i)] = p.slice(i + 1);
+                    });
+                    addOrReplaceCollection({
+                        tank: source,
+                        collected_at_utc: kv.utc,
+                        lat: kv.lat ? parseInt(kv.lat, 10) / 1e7 : null,
+                        lon: kv.lon ? parseInt(kv.lon, 10) / 1e7 : null,
+                        fix_valid: kv.fix === "1",
+                    });
+                }
+            } else if (source === "ELMETRON") {
+                if (kind === "STATE") opState.elmetron.state = details;
+                if (kind === "STEP")  opState.elmetron.step  = details;
+            } else if (source === "SYS" && kind === "BOOT") {
+                opState.firmware_version = details;
+            } else if (source === "SYS" && kind === "BATTERY") {
+                const m = details.match(/^([\d.]+)\s*V/);
+                if (m) opState.last_battery_volts = parseFloat(m[1]);
+            } else if (source === "SYS" && kind === "GPS") {
+                const kv = {};
+                details.split(",").forEach(p => {
+                    const i = p.indexOf("="); if (i > 0) kv[p.slice(0,i)] = p.slice(i+1);
+                });
+                opState.last_gps = kv;
+            } else if (source === "SYS" && kind === "LEVEL") {
+                // EVT,SYS,LEVEL,id=N,full=0|1,raw=0|1 — from the
+                // periodic LEVEL poller, drives the per-tank live pill.
+                const kv = {};
+                details.split(",").forEach(p => {
+                    const i = p.indexOf("="); if (i > 0) kv[p.slice(0,i)] = p.slice(i+1);
+                });
+                const id = parseInt(kv.id, 10);
+                if (id >= 1 && id <= 3) {
+                    opState.tank_levels["C" + id] = {
+                        full: kv.full === "1",
+                        raw:  kv.raw === "1",
+                    };
+                }
+            }
+
+            // Suppress the periodic LEVEL poll noise from the live log
+            // (LEVEL events and their ACKs fire ~3× every 2 s and would
+            // drown every other event). State still updates.
+            const isLevelPoll =
+                (source === "SYS" && kind === "LEVEL") ||
+                (source === "SYS" && kind === "ACK" && details === "LEVEL");
+            if (!isLevelPoll) {
+                let cls = "log-evt";
+                if (kind === "ACK")   cls = "log-ack";
+                if (kind === "NACK")  cls = "log-nack";
+                if (kind === "ERROR") cls = "log-error";
+                appendLog(`EVT,${source},${kind}${details ? "," + details : ""}`, cls);
+            }
+            renderOpState();
+        }
+
+        function applyTlm(tlm) {
+            opState.last_tlm = tlm;
+            opState.last_tlm_local_ts = Date.now();
+            renderOpState();
+        }
+
+        function openSSE() {
+            const es = new EventSource("/api/stream/live");
+            es.onmessage = (e) => {
+                let msg;
+                try { msg = JSON.parse(e.data); }
+                catch { return; }
+                if (msg.type === "snapshot") {
+                    applySnapshot(msg.state);
+                } else if (msg.type === "evt") {
+                    applyEvt(msg.source, msg.kind, msg.details);
+                } else if (msg.type === "tlm") {
+                    applyTlm(msg.tlm);
+                }
+            };
+            es.onerror = () => {
+                appendLog("SSE disconnected, retrying...", "log-error");
+                // EventSource retries automatically; nothing else to do.
+            };
+        }
+
+        document.addEventListener("DOMContentLoaded", () => {
+            renderOpState();
+            openSSE();
+        });
+
+        // ================== Existing historical dashboard ==================
+
         const API_URL = 'http://127.0.0.1:8000/api/data/all_readings';
         // Dodano oxygenChartInstance
         let mymap = null, phChartInstance = null, oxyChartInstance = null, tempChartInstance = null, condChartInstance = null;
         let startPicker, endPicker, mapMarkers = [];
+        // Separate layer for collection pins so the chart-driven map
+        // refresh (which wipes its own layer) doesn't drop them.
+        let measurementLayer = null, collectionLayer = null;
+        // Last-known collection per tank — keyed by tank id so repeated
+        // EVT,Cx,COLLECTED events (e.g. on STATUS bursts) replace the
+        // marker in place instead of stacking duplicates.
+        const collectionMarkers = { C1: null, C2: null, C3: null };
+        const TANK_COLORS = { C1: '#0d6efd', C2: '#198754', C3: '#fd7e14' };
+
+        function addOrReplaceCollection(c) {
+            if (c.lat == null || c.lon == null) return;
+            if (c.lat === 0 && c.lon === 0) return;  // pre-fix capture
+            const existing = collectionMarkers[c.tank];
+            if (existing) collectionLayer.removeLayer(existing);
+            const color = TANK_COLORS[c.tank] || '#dc3545';
+            const m = L.circleMarker([c.lat, c.lon], {
+                radius: 10, weight: 3, color: '#fff',
+                fillColor: color, fillOpacity: 1,
+            }).bindPopup(
+                `<b>Tank ${c.tank}</b><br>` +
+                `collected: ${c.collected_at_utc || '--'}<br>` +
+                `fix: ${c.fix_valid ? 'yes' : 'no'}<br>` +
+                `lat: ${c.lat.toFixed(6)}, lon: ${c.lon.toFixed(6)}`
+            );
+            m.addTo(collectionLayer);
+            collectionMarkers[c.tank] = m;
+        }
+
+        async function loadCollections() {
+            try {
+                const res = await fetch('/api/collections/recent');
+                const data = await res.json();
+                // Drop existing and rebuild — backend list is newest-first.
+                Object.values(collectionMarkers).forEach(m => m && collectionLayer.removeLayer(m));
+                for (const k of Object.keys(collectionMarkers)) collectionMarkers[k] = null;
+                // Walk oldest -> newest so latest overrides per tank.
+                for (const c of [...data.collections].reverse()) addOrReplaceCollection(c);
+            } catch (e) { console.error('loadCollections:', e); }
+        }
         let lastFilteredReadings = [];
 
         const formatPL = (d) => new Date(d).toLocaleString('pl-PL', {
@@ -236,13 +703,17 @@
         function initApp() {
             startPicker = flatpickr("#time-start", { enableTime: true, time_24hr: true, dateFormat: "d.m.Y H:i", locale: "pl" });
             endPicker = flatpickr("#time-end", { enableTime: true, time_24hr: true, dateFormat: "d.m.Y H:i", locale: "pl" });
-            mymap = L.map('map-container').setView([52.0, 19.0], 6); 
+            mymap = L.map('map-container').setView([52.0, 19.0], 6);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mymap);
+            measurementLayer = L.layerGroup().addTo(mymap);
+            collectionLayer  = L.layerGroup().addTo(mymap);
         }
 
         function updateMap(readings) {
-            mymap.eachLayer(layer => { if (layer instanceof L.Marker) mymap.removeLayer(layer); });
-            mapMarkers = readings.map(r => L.marker([r.lat, r.lon]).addTo(mymap).bindPopup(
+            // Only clear measurement markers — collection pins live in
+            // their own layer and persist across chart refreshes.
+            measurementLayer.clearLayers();
+            mapMarkers = readings.map(r => L.marker([r.lat, r.lon]).addTo(measurementLayer).bindPopup(
                 `<b>${formatPL(r.time)}</b><br>pH: ${r.ph}<br>Tlen: ${r.oxygen}`
             ));
             if (readings.length > 0) mymap.fitBounds(readings.map(r => [r.lat, r.lon]), { padding: [40, 40] });
@@ -313,7 +784,12 @@
         // Reset zoomu dla 4 wykresów
         function resetZoom() { [phChartInstance, oxyChartInstance, tempChartInstance, condChartInstance].forEach(c => c && c.resetZoom()); }
 
-        document.addEventListener('DOMContentLoaded', () => { initApp(); fetchData(); setInterval(() => { if (!startPicker.selectedDates[0] && !endPicker.selectedDates[0]) fetchData(); }, 5000); });
+        document.addEventListener('DOMContentLoaded', () => {
+            initApp();
+            loadCollections();
+            fetchData();
+            setInterval(() => { if (!startPicker.selectedDates[0] && !endPicker.selectedDates[0]) fetchData(); }, 5000);
+        });
     </script>
 </body>
 </html>
