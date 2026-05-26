@@ -20,6 +20,7 @@
 #include <stddef.h>
 
 #include "Sampler.h"
+#include "Elmetron.h"
 
 class Clock;
 class RadioLink;
@@ -28,6 +29,7 @@ class ServoBus;
 class PumpControl;
 class LevelSensor;
 class GpsLink;
+class Telemetry;
 
 enum class SystemMode : uint8_t {
     IDLE,
@@ -78,6 +80,18 @@ public:
     // CMD,GPS,RAW / CMD,GPS,RESET work for bench tests.
     void set_gps_link(GpsLink* gps) { gps_ = gps; }
 
+    // Optional: attach the Elmetron measurement subsystem. When
+    // attached, CMD,START_ELMETRON drives a settle-and-measure cycle
+    // and the system mode tracks MEASURING; STATUS reports its live
+    // state. Without it, START_ELMETRON NACKs "not_implemented".
+    void set_elmetron(Elmetron* el) { elmetron_ = el; }
+
+    // Optional: attach the Telemetry singleton so probe readings are
+    // pushed into the TLM stream while the Elmetron is in IN_WATER.
+    // Without it the Elmetron still runs but TLM carries no probe
+    // data (probe fields stay zero, measurement_valid stays 0).
+    void set_telemetry(Telemetry* t) { telemetry_ = t; }
+
 private:
     // Per-tank geo-tag captured at the moment the Sampler transitions
     // to FULL. `valid` stays false until the tank has been collected
@@ -107,11 +121,17 @@ private:
     PumpControl*    pump_control_ = nullptr;
     LevelSensor*    level_sensor_ = nullptr;
     GpsLink*        gps_ = nullptr;
+    Elmetron*       elmetron_ = nullptr;
+    Telemetry*      telemetry_ = nullptr;
 
     // Command handlers
     void cmd_start_tank(uint8_t idx, const char* verb);
+    void cmd_start_elmetron(const char* verb);
     void cmd_estop(const char* verb);
+    void cmd_stop_tank(uint8_t idx, const char* verb);
+    void cmd_stop_elmetron(const char* verb);
     void cmd_reset_tank(uint8_t idx, const char* verb);
+    void cmd_reset_elmetron(const char* verb);
     void cmd_status(const char* verb);
     void cmd_ping(const char* verb);
     void cmd_adc_scan(const char* verb);
@@ -129,6 +149,9 @@ private:
     void set_mode(SystemMode m);
     bool any_tank_sampling() const;
     bool any_tank_in_fault() const;
+    bool elmetron_measuring() const;
+    bool elmetron_in_fault() const;
+    bool is_busy() const;  // any tank sampling OR elmetron measuring
 
     // EVT emission helpers
     void emit_ack(const char* verb);
@@ -136,13 +159,31 @@ private:
     void emit_sys_state();
     void emit_tank_state(Sampler& tank);
     void emit_tank_step(Sampler& tank);
+    void emit_elmetron_state();
+    void emit_elmetron_step();
     void emit_boot(const char* version);
 
     // Drive the tank's servo on DESCENDING/ASCENDING step entries.
     void drive_servo_for_step(const Sampler& tank);
 
+    // Freeze the servo at its current physical position. Reads
+    // present-position via the SC-09 bus and writes it back as the
+    // new goal, so the servo abandons whatever DESCENDING/ASCENDING
+    // endpoint it was tracking to and holds in place. No-op if the
+    // bus isn't attached or the read fails (the SC-09 will then keep
+    // tracking to its previous target — same as pre-STOP behaviour).
+    void freeze_tank_servo(uint8_t servo_id);
+
     // Drive the tank's pump on PUMPING entry, off on any other step.
     void drive_pump_for_step(const Sampler& tank);
+
+    // Drive the Elmetron winch servo on DESCENDING/ASCENDING entries.
+    void drive_elmetron_servo_for_step();
+
+    // Push the current Elmetron reading (synthetic ramp during settle,
+    // steady-state thereafter) into the telemetry pipeline. Called
+    // every tick while elmetron_ is attached; no-op without telemetry_.
+    void push_elmetron_reading();
 
     // Geo-tag the per-tank collection on STATE -> FULL and emit
     // EVT,Cx,COLLECTED,... . No-op if GPS not attached.

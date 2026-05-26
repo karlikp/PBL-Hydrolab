@@ -11,6 +11,7 @@
 #include "PumpControl.h"
 #include "LevelSensor.h"
 #include "GpsLink.h"
+#include "Telemetry.h"
 
 #include <driver/gpio.h>
 
@@ -75,8 +76,22 @@ void MissionControl::tick() {
         }
     }
 
+    if (elmetron_) {
+        elmetron_->tick();
+        if (elmetron_->consume_state_change()) emit_elmetron_state();
+        if (elmetron_->consume_step_change()) {
+            emit_elmetron_step();
+            drive_elmetron_servo_for_step();
+        }
+        push_elmetron_reading();
+    }
+
     // When the last sampling tank finishes, drop back to IDLE.
     if (mode_ == SystemMode::SAMPLING && !any_tank_sampling()) {
+        set_mode(SystemMode::IDLE);
+    }
+    // When the Elmetron cycle finishes, drop back to IDLE.
+    if (mode_ == SystemMode::MEASURING && !elmetron_measuring()) {
         set_mode(SystemMode::IDLE);
     }
 
@@ -110,9 +125,12 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
     };
 
     // E-STOP gate: while latched, refuse anything except RESET_*,
-    // STATUS, PING, and (idempotently) E_STOP itself.
+    // STATUS, PING, and (idempotently) E_STOP itself. Per-subsystem
+    // STOPs are also refused — once the whole system is latched, you
+    // can't selectively un-fault things; full reset path applies.
     if (mode_ == SystemMode::E_STOP
         && !matches("RESET_C1") && !matches("RESET_C2") && !matches("RESET_C3")
+        && !matches("RESET_ELMETRON")
         && !matches("STATUS")   && !matches("PING")     && !matches("E_STOP")) {
         emit_nack(verb, "e_stop_active");
         return;
@@ -121,11 +139,16 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
     if      (matches("START_C1"))       cmd_start_tank(0, verb);
     else if (matches("START_C2"))       cmd_start_tank(1, verb);
     else if (matches("START_C3"))       cmd_start_tank(2, verb);
-    else if (matches("START_ELMETRON")) emit_nack(verb, "not_implemented");
+    else if (matches("START_ELMETRON")) cmd_start_elmetron(verb);
     else if (matches("E_STOP"))         cmd_estop(verb);
+    else if (matches("STOP_C1"))        cmd_stop_tank(0, verb);
+    else if (matches("STOP_C2"))        cmd_stop_tank(1, verb);
+    else if (matches("STOP_C3"))        cmd_stop_tank(2, verb);
+    else if (matches("STOP_ELMETRON"))  cmd_stop_elmetron(verb);
     else if (matches("RESET_C1"))       cmd_reset_tank(0, verb);
     else if (matches("RESET_C2"))       cmd_reset_tank(1, verb);
     else if (matches("RESET_C3"))       cmd_reset_tank(2, verb);
+    else if (matches("RESET_ELMETRON")) cmd_reset_elmetron(verb);
     else if (matches("STATUS"))         cmd_status(verb);
     else if (matches("PING"))           cmd_ping(verb);
     else if (matches("ADC_SCAN"))       cmd_adc_scan(verb);
@@ -371,7 +394,7 @@ void MissionControl::cmd_gpio(const char* verb, const char* args, size_t args_le
 void MissionControl::cmd_start_tank(uint8_t idx, const char* verb) {
     Sampler& t = tanks_[idx];
 
-    if (any_tank_sampling())              { emit_nack(verb, "busy");      return; }
+    if (is_busy())                        { emit_nack(verb, "busy");      return; }
     if (t.state() == TankState::FULL)     { emit_nack(verb, "tank_full"); return; }
     if (t.state() == TankState::FAULT)    { emit_nack(verb, "fault");     return; }
     if (!t.request_start())               { emit_nack(verb, "busy");      return; }
@@ -380,10 +403,66 @@ void MissionControl::cmd_start_tank(uint8_t idx, const char* verb) {
     set_mode(SystemMode::SAMPLING);
 }
 
+void MissionControl::cmd_start_elmetron(const char* verb) {
+    if (!elmetron_)                       { emit_nack(verb, "not_implemented"); return; }
+    if (is_busy())                        { emit_nack(verb, "busy");            return; }
+    if (elmetron_->state() == ElmetronState::FAULT) {
+        emit_nack(verb, "fault");
+        return;
+    }
+    if (!elmetron_->request_start())      { emit_nack(verb, "busy");            return; }
+
+    emit_ack(verb);
+    set_mode(SystemMode::MEASURING);
+}
+
+// CMD,STOP_Cx — abort one tank without latching the whole system to
+// E_STOP. The tank goes to FAULT in place (servo frozen at its
+// current physical position, pump drops off via the step-change
+// hook). System mode settles back to IDLE on the next tick if
+// nothing else is active — other tanks / Elmetron remain available
+// to start once the user resets the faulted one. NACKs `not_running`
+// if the tank isn't currently sampling, so the operator sees
+// "nothing to stop" instead of putting an idle tank into FAULT.
+void MissionControl::cmd_stop_tank(uint8_t idx, const char* verb) {
+    Sampler& t = tanks_[idx];
+    if (t.state() != TankState::SAMPLING) {
+        emit_nack(verb, "not_running");
+        return;
+    }
+    // Freeze the servo BEFORE the FSM transitions out of SAMPLING.
+    // The SC-09 is position-controlled — without this it would
+    // finish tracking to whatever DESCENDING/ASCENDING endpoint was
+    // last commanded, not "stay where it is" as the operator expects.
+    freeze_tank_servo(t.id());
+    t.abort();
+    emit_ack(verb);
+}
+
+// CMD,STOP_ELMETRON — same semantics as STOP_Cx, for the Elmetron
+// subsystem. Winch stops where it is (drive_elmetron_servo_for_step
+// is a no-op outside DESCENDING/ASCENDING). System mode returns to
+// IDLE on the next tick once Elmetron is no longer MEASURING.
+void MissionControl::cmd_stop_elmetron(const char* verb) {
+    if (!elmetron_) {
+        emit_nack(verb, "not_implemented");
+        return;
+    }
+    if (elmetron_->state() != ElmetronState::MEASURING) {
+        emit_nack(verb, "not_running");
+        return;
+    }
+    elmetron_->abort();
+    emit_ack(verb);
+}
+
 void MissionControl::cmd_estop(const char* verb) {
     emit_ack(verb);
     for (auto& t : tanks_) {
         if (t.state() == TankState::SAMPLING) t.abort();
+    }
+    if (elmetron_ && elmetron_->state() == ElmetronState::MEASURING) {
+        elmetron_->abort();
     }
     // Safety: force every pump off immediately, regardless of where
     // each Sampler was in its FSM. The step-change hook would do this
@@ -402,10 +481,57 @@ void MissionControl::cmd_reset_tank(uint8_t idx, const char* verb) {
     }
     emit_ack(verb);
 
+    // Return the tank's winch to its init (home) position. STOP froze
+    // the SC-09 at some mid-position; RESET clears the fault AND brings
+    // the cable back to a known start state so the next START_Cx begins
+    // from HOME, matching the operator-mental-model of "reset = back
+    // to ready." The SC-09 is closed-loop, so this is reliable.
+    if (servo_bus_) {
+        servo_bus_->move(t.id(), SAMPLER_HOME_POSITION);
+    }
+
     // If E-STOP latched and there are no fault tanks left, drop to IDLE.
+    // The Elmetron is implicitly cleared at the same time — the
+    // protocol doesn't expose a RESET_ELMETRON, and FAULT today only
+    // happens via E-STOP, so the tank-reset stream is the recovery
+    // path for the whole system.
     if (mode_ == SystemMode::E_STOP && !any_tank_in_fault()) {
+        if (elmetron_ && elmetron_->state() == ElmetronState::FAULT) {
+            elmetron_->reset();
+        }
         set_mode(SystemMode::IDLE);
     }
+}
+
+// CMD,RESET_ELMETRON — clear Elmetron FAULT back to DOCKED. Needed
+// now that STOP_ELMETRON can fault Elmetron without latching the
+// whole system in E_STOP (the E-STOP recovery path is still the
+// implicit way to clear Elmetron when the system itself was latched).
+//
+// Like RESET_Cx, the intent is "back to init position." The H-bridge
+// winch is open-loop with no absolute position feedback — its only
+// reference is H_LIMIT. When the WinchH driver lands, RESET should
+// drive UP until H_LIMIT trips (same homing routine the HOMING step
+// uses on START_ELMETRON), with a hard time bound and FAULT-on-
+// timeout. Until then, RESET only flips state and the winch stays
+// where STOP left it physically.
+void MissionControl::cmd_reset_elmetron(const char* verb) {
+    if (!elmetron_) {
+        emit_nack(verb, "not_implemented");
+        return;
+    }
+    if (!elmetron_->reset()) {
+        // reset() refuses anywhere except FAULT — surface why.
+        emit_nack(verb,
+            elmetron_->state() == ElmetronState::MEASURING ? "busy" : "not_in_fault");
+        return;
+    }
+    emit_ack(verb);
+    // TODO(winch-h): drive UP until H_LIMIT to restore init position.
+    // Without it, the operator gets "fault cleared, but winch is still
+    // wherever STOP froze it" — they'd need to START a measurement
+    // to trigger HOMING. Once the H-bridge driver exists, add the
+    // homing call here so RESET matches the tank-side behaviour.
 }
 
 void MissionControl::cmd_status(const char* verb) {
@@ -418,9 +544,13 @@ void MissionControl::cmd_status(const char* verb) {
     for (uint8_t i = 0; i < 3; ++i) {
         if (collections_[i].valid) emit_collection(i);
     }
-    // Elmetron isn't implemented yet; report DOCKED placeholder so the
-    // GCS has a complete snapshot to render.
-    send_payload("EVT,ELMETRON,STATE,DOCKED");
+    // Live Elmetron state if attached, else the historical DOCKED
+    // placeholder so the GCS snapshot is always complete.
+    if (elmetron_) {
+        emit_elmetron_state();
+    } else {
+        send_payload("EVT,ELMETRON,STATE,DOCKED");
+    }
     if (battery_) {
         char buf[80];
         snprintf(buf, sizeof(buf), "EVT,SYS,BATTERY,%.2fV/raw=%u/mv=%lu",
@@ -455,6 +585,18 @@ bool MissionControl::any_tank_in_fault() const {
     return false;
 }
 
+bool MissionControl::elmetron_measuring() const {
+    return elmetron_ && elmetron_->state() == ElmetronState::MEASURING;
+}
+
+bool MissionControl::elmetron_in_fault() const {
+    return elmetron_ && elmetron_->state() == ElmetronState::FAULT;
+}
+
+bool MissionControl::is_busy() const {
+    return any_tank_sampling() || elmetron_measuring();
+}
+
 void MissionControl::emit_ack(const char* verb) {
     char buf[64];
     snprintf(buf, sizeof(buf), "EVT,SYS,ACK,%s", verb);
@@ -485,6 +627,22 @@ void MissionControl::emit_tank_step(Sampler& tank) {
     char buf[48];
     snprintf(buf, sizeof(buf), "EVT,%s,STEP,%s",
              tank_source(tank.id() - 1), step_name(tank.step()));
+    send_payload(buf);
+}
+
+void MissionControl::emit_elmetron_state() {
+    if (!elmetron_) return;
+    char buf[48];
+    snprintf(buf, sizeof(buf), "EVT,ELMETRON,STATE,%s",
+             state_name(elmetron_->state()));
+    send_payload(buf);
+}
+
+void MissionControl::emit_elmetron_step() {
+    if (!elmetron_ || elmetron_->step() == ElmetronStep::NONE) return;
+    char buf[48];
+    snprintf(buf, sizeof(buf), "EVT,ELMETRON,STEP,%s",
+             step_name(elmetron_->step()));
     send_payload(buf);
 }
 
@@ -659,6 +817,23 @@ void MissionControl::drive_servo_for_step(const Sampler& tank) {
     }
 }
 
+// Read the SC-09's current present position and command it back to
+// that same value — the servo stops tracking to its old goal and
+// holds where it physically is. Used by STOP_Cx to make abort
+// behave the way the operator expects (cable stays where it was at
+// the moment of stop, not "finishes whatever motion was queued").
+//
+// Falls back gracefully if the half-duplex bus read returns -1 or
+// an obviously-bad value: do nothing, and the servo continues to
+// its previous goal — i.e. behaviour is no worse than before the
+// freeze logic existed.
+void MissionControl::freeze_tank_servo(uint8_t servo_id) {
+    if (!servo_bus_) return;
+    const int pos = servo_bus_->read_position(servo_id);
+    if (pos < 0 || pos > 1023) return;
+    servo_bus_->move(servo_id, static_cast<uint16_t>(pos));
+}
+
 // Drive the pump for `tank` based on its current step. Pump on
 // exactly when the tank is in PUMPING; off for every other step
 // (including NONE on FAULT). Idempotent — safe to call on every
@@ -667,6 +842,49 @@ void MissionControl::drive_pump_for_step(const Sampler& tank) {
     if (!pump_control_) return;
     const bool should_pump = (tank.step() == TankStep::PUMPING);
     pump_control_->set(tank.id(), should_pump);
+}
+
+// Drive the Elmetron winch on step transitions.
+//
+// !!! HARDWARE NOT YET CONNECTED — stub.
+//
+// The Elmetron winch is NOT a servo on the SC-09 bus. Per the board
+// pinout (docs/hardware/board_pinout.pdf), it's a brushed DC motor on
+// a dedicated H-bridge (H_EN_L=IO6, H_EN_R=IO7, H_PWM=IO15) with a
+// single limit switch (H_LIMIT=IO12). A separate `WinchH` driver
+// module will land here once the HW team wires up that subsystem and
+// we can characterise direction polarity, PWM duty, descent time, and
+// limit-switch position on the bench.
+//
+// Today the FSM still ticks through HOMING / DESCENDING / IN_WATER /
+// ASCENDING / HOME on time-based transitions and the protocol-level
+// events still emit correctly — only the physical motion is missing.
+void MissionControl::drive_elmetron_servo_for_step() {
+    // TODO(winch-h): once WinchH driver exists:
+    //   HOMING     → drive UP, monitor H_LIMIT, exit on limit
+    //                or FAULT on HOMING_MAX_MS timeout (the
+    //                step-side timeout in Elmetron::tick is the
+    //                safety bound — this drives the motor)
+    //   DESCENDING → drive DOWN at PWM duty
+    //   IN_WATER   → motor stop (cable held by mechanism / brake)
+    //   ASCENDING  → drive UP, monitor H_LIMIT
+    //   HOME       → motor stop
+    //   NONE       → motor stop (covers abort paths)
+}
+
+// Push the Elmetron's current reading into Telemetry. While the
+// probe is in MEASURING the synthetic ramp (or, later, a real
+// driver) drives cond/temp/ph/oxygen + measurement_valid; in every
+// other state we explicitly clear the probe-side TLM fields so the
+// stream doesn't carry a stale post-measurement value indefinitely.
+void MissionControl::push_elmetron_reading() {
+    if (!telemetry_ || !elmetron_) return;
+    if (elmetron_->state() == ElmetronState::MEASURING) {
+        const Elmetron::Reading r = elmetron_->last_reading();
+        telemetry_->update_measurement(r.cond, r.temp, r.ph, r.oxygen, r.valid);
+    } else {
+        telemetry_->clear_measurement();
+    }
 }
 
 // CMD,GPS,<sub> — sub is STATUS / RAW / RESET.

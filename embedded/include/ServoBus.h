@@ -46,6 +46,18 @@ public:
     // Best-effort — broadcast writes don't get a reply.
     bool move(uint8_t id, uint16_t position, uint16_t speed = 1500);
 
+    // Read the servo's current present position (register
+    // SCSCL_PRESENT_POSITION). Returns 0..1023 on success, -1 on
+    // failure / timeout / no servo at this ID.
+    //
+    // CAVEAT — same half-duplex echo problem the existing ping()
+    // suffers from. The 8-byte read request echoes back on RX before
+    // the servo's reply arrives, and the SCServo library doesn't
+    // drain the echo, so the return can be unreliable. Treat -1 OR
+    // an obviously-bad value (e.g. > 1023) as "couldn't determine."
+    // Callers should fall back to safe behaviour when this fails.
+    int read_position(uint8_t id);
+
     // Broadcast move — every servo on the bus.
     bool move_all(uint16_t position, uint16_t speed = 1500) {
         return move(BROADCAST_ID, position, speed);

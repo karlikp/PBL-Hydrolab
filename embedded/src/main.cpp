@@ -33,6 +33,7 @@
 #if !defined(ISOLATE_UART0_FOR_SERVO) && !defined(RADIO_TEST_MODE)
 #  include "BatteryMonitor.h"
 #  include "Clock.h"
+#  include "Elmetron.h"
 #  include "FrameCodec.h"
 #  include "GpsLink.h"
 #  include "LevelSensor.h"
@@ -104,6 +105,7 @@ ServoBus       g_servo_bus(Serial);
 
 MissionControl g_controller(g_clock, g_radio);
 Telemetry      g_telemetry(g_clock, g_radio);
+Elmetron       g_elmetron(g_clock);
 #ifdef BOARD_ESP32_S3
 BatteryMonitor g_battery(g_clock, g_radio, BATTERY_ADC_PIN, POWER_LATCH_PIN);
 PumpControl    g_pumps;
@@ -272,20 +274,38 @@ void setup() {
     delay(200);  // settle so the BOOT event isn't lost on hot-attach
     g_radio.on_frame(on_frame, nullptr);
 
+    // Elmetron and Telemetry are pure-software; wired on every board
+    // (classic, S3 production, S3 bench) so CMD,START_ELMETRON works
+    // uniformly across builds.
+    g_controller.set_elmetron(&g_elmetron);
+    g_controller.set_telemetry(&g_telemetry);
+
 #ifdef BOARD_ESP32_S3
     g_pumps.begin();
     g_levels.begin();
     g_gps.begin(GPS_SDA_PIN, GPS_SCL_PIN);
 #  ifndef UART0_PROTOCOL_LINK
-    // Bench mode (USB-powered, CP210x link) reads ~5 V on the battery
-    // ADC and would immediately trip CRITICAL → drop the power latch
-    // → kill the board. Skip the monitor entirely in that build.
+    g_controller.set_servo_bus(&g_servo_bus);
+    // Battery monitor:
+    //   - Skipped on the -uartlink bench (USB on ADC reads ~5 V and
+    //     would immediately trip CRITICAL → drop the power latch).
+    //   - Skipped when DISABLE_BATTERY_MONITOR is set on the deploy
+    //     env — TEMPORARY while the R18/R19 divider rework is pending
+    //     (see hw-battery-divider-saturation memory). Once HW lands,
+    //     drop the flag in platformio.ini to re-enable protection.
+#    ifndef DISABLE_BATTERY_MONITOR
     g_battery.begin();
     g_controller.set_battery_monitor(&g_battery);
-    g_controller.set_servo_bus(&g_servo_bus);
+#    endif
 #  endif
     g_controller.set_pump_control(&g_pumps);
+#  ifndef MOCK_PERIPHERALS
+    // Mock build leaves the level sensor detached so the Sampler
+    // PUMPING step falls back to the ~2 s mock timer rather than
+    // waiting 30 s for the no-sensor safety timeout. Real bench
+    // testing keeps the sensor attached.
     g_controller.set_level_sensor(&g_levels);
+#  endif
     g_controller.set_gps_link(&g_gps);
 #endif
 
@@ -302,21 +322,15 @@ void loop() {
 #  endif
     g_gps.tick();
     if (g_gps.consume_changed()) {
-        // Push the latest GPS fix into the next TLM emission. Other
-        // Telemetry fields (cond / temp / ph / oxygen / water_flag)
-        // stay at whatever the sensor drivers last set them to.
+        // Push the latest GPS fix into the next TLM emission. Probe
+        // fields (cond / temp / ph / oxygen / measurement_valid) are
+        // managed via a separate Telemetry path so this updater never
+        // clobbers them.
         const GpsLink::Fix& f = g_gps.last_fix();
-        Telemetry::Sample s;
-        s.lat       = f.lat;
-        s.lon       = f.lon;
-        s.year      = f.year;
-        s.month     = f.month;
-        s.day       = f.day;
-        s.hour      = f.hour;
-        s.minute    = f.minute;
-        s.second    = f.second;
-        s.fix_valid = f.fix_valid;
-        g_telemetry.update(s);
+        g_telemetry.update_gps(f.lat, f.lon,
+                               f.year, f.month, f.day,
+                               f.hour, f.minute, f.second,
+                               f.fix_valid);
     }
 #endif
     delay(5);

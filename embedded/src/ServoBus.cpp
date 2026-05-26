@@ -27,6 +27,21 @@ int ServoBus::ping(uint8_t id) {
     return impl_->sc.Ping(id);
 }
 
+int ServoBus::read_position(uint8_t id) {
+    // SCSCL::ReadPos sends an 8-byte READ instruction and reads back a
+    // status reply containing the position word. On this board's
+    // half-duplex bus the request echoes back on RX before the servo's
+    // reply arrives — see the explainer above `set_id` for the same
+    // problem on writes. The SCServo library has no echo-drain, so
+    // this call may return garbage on real hardware. We at least drain
+    // any leftover RX afterwards so the next operation starts clean.
+    const int pos = impl_->sc.ReadPos(id);
+    if (impl_->sc.pSerial) {
+        while (impl_->sc.pSerial->available()) (void)impl_->sc.pSerial->read();
+    }
+    return pos;
+}
+
 // Both set_id variants intentionally ignore the SCServo library's
 // Ack() return codes. Reason: the SC-09 bus is half-duplex on a single
 // wire, so every byte the ESP transmits is also echoed back on its

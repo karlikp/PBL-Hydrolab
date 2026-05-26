@@ -56,7 +56,7 @@ namespace mock_timing {
     constexpr uint32_t DESCENDING_MS     = 3000;
     constexpr uint32_t IN_WATER_MS       = 500;
     constexpr uint32_t PUMPING_MS        = 2000;     // no-sensor fallback
-    constexpr uint32_t PUMPING_TIMEOUT_MS = 30000;   // with-sensor hard cap
+    constexpr uint32_t PUMPING_TIMEOUT_MS = 90000;   // with-sensor hard cap
     constexpr uint32_t ASCENDING_MS      = 3000;
     constexpr uint32_t HOME_MS           = 500;
 }

@@ -8,8 +8,36 @@
 Telemetry::Telemetry(Clock& clock, RadioLink& radio)
     : clock_(clock), radio_(radio) {}
 
-void Telemetry::update(const Sample& s) {
-    latest_ = s;
+void Telemetry::update_gps(long lat, long lon,
+                           uint16_t year, uint8_t month, uint8_t day,
+                           uint8_t hour, uint8_t minute, uint8_t second,
+                           bool fix_valid) {
+    latest_.lat       = lat;
+    latest_.lon       = lon;
+    latest_.year      = year;
+    latest_.month     = month;
+    latest_.day       = day;
+    latest_.hour      = hour;
+    latest_.minute    = minute;
+    latest_.second    = second;
+    latest_.fix_valid = fix_valid;
+}
+
+void Telemetry::update_measurement(float cond, float temp, float ph, float oxygen,
+                                   bool measurement_valid) {
+    latest_.cond              = cond;
+    latest_.temp              = temp;
+    latest_.ph                = ph;
+    latest_.oxygen            = oxygen;
+    latest_.measurement_valid = measurement_valid;
+}
+
+void Telemetry::clear_measurement() {
+    latest_.cond              = 0.0f;
+    latest_.temp              = 0.0f;
+    latest_.ph                = 0.0f;
+    latest_.oxygen            = 0.0f;
+    latest_.measurement_valid = false;
 }
 
 void Telemetry::tick() {
@@ -43,11 +71,12 @@ void Telemetry::emit() {
 
     char buf[200];
     const int n = snprintf(buf, sizeof(buf),
-        "TLM,%04u-%02u-%02u %02u:%02u:%02u,%ld,%ld,%.2f,%.2f,%.2f,%.2f,%d",
+        "TLM,%04u-%02u-%02u %02u:%02u:%02u,%ld,%ld,%.2f,%.2f,%.2f,%.2f,%d,%d",
         yyyy, mo, dd, hh, mm, ss,
         latest_.lat, latest_.lon,
         latest_.cond, latest_.temp, latest_.ph, latest_.oxygen,
-        latest_.water_flag ? 1 : 0);
+        latest_.water_flag ? 1 : 0,
+        latest_.measurement_valid ? 1 : 0);
 
     // Refuse to send a truncated frame (defends against future field
     // additions that overflow the buffer — see comms-robustness notes).
