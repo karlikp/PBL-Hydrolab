@@ -20,17 +20,31 @@ void Telemetry::tick() {
 }
 
 void Telemetry::emit() {
-    // Synthesise a clock from millis() until GPS time is wired in.
-    const uint32_t ms  = clock_.now_ms();
-    const uint32_t s   = ms / 1000;
-    const uint32_t hh  = (s / 3600) % 24;
-    const uint32_t mm  = (s / 60) % 60;
-    const uint32_t ss  =  s % 60;
+    // Use GPS UTC if the last sample has a valid date+time; otherwise
+    // fall back to a millis()-synthesised stamp so frames stay parseable
+    // during bring-up before the module has a fix.
+    unsigned yyyy, mo, dd, hh, mm, ss;
+    if (latest_.year != 0) {
+        yyyy = latest_.year;
+        mo   = latest_.month;
+        dd   = latest_.day;
+        hh   = latest_.hour;
+        mm   = latest_.minute;
+        ss   = latest_.second;
+    } else {
+        const uint32_t s = clock_.now_ms() / 1000;
+        yyyy = 1970;
+        mo   = 1;
+        dd   = 1;
+        hh   = (s / 3600) % 24;
+        mm   = (s / 60) % 60;
+        ss   =  s % 60;
+    }
 
     char buf[200];
     const int n = snprintf(buf, sizeof(buf),
-        "TLM,1970-01-01 %02u:%02u:%02u,%ld,%ld,%.2f,%.2f,%.2f,%.2f,%d",
-        (unsigned)hh, (unsigned)mm, (unsigned)ss,
+        "TLM,%04u-%02u-%02u %02u:%02u:%02u,%ld,%ld,%.2f,%.2f,%.2f,%.2f,%d",
+        yyyy, mo, dd, hh, mm, ss,
         latest_.lat, latest_.lon,
         latest_.cond, latest_.temp, latest_.ph, latest_.oxygen,
         latest_.water_flag ? 1 : 0);

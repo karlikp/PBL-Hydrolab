@@ -26,6 +26,8 @@ class RadioLink;
 class BatteryMonitor;
 class ServoBus;
 class PumpControl;
+class LevelSensor;
+class GpsLink;
 
 enum class SystemMode : uint8_t {
     IDLE,
@@ -64,15 +66,47 @@ public:
     // turns a pump on, and CMD,PUMP,<id>,<state> works for bench tests.
     void set_pump_control(PumpControl* pc) { pump_control_ = pc; }
 
+    // Optional: attach the level sensor cluster. When attached, the
+    // PUMPING step ends as soon as the matching tank's sensor reports
+    // "full" instead of running for the full mock duration, and
+    // CMD,LEVEL,<id> reads back a single sensor.
+    void set_level_sensor(LevelSensor* ls);
+
+    // Optional: attach the GPS module. When attached, a Sampler
+    // transitioning to FULL captures the current GPS fix into the
+    // tank's Collection record (geo-tag), and CMD,GPS,STATUS /
+    // CMD,GPS,RAW / CMD,GPS,RESET work for bench tests.
+    void set_gps_link(GpsLink* gps) { gps_ = gps; }
+
 private:
+    // Per-tank geo-tag captured at the moment the Sampler transitions
+    // to FULL. `valid` stays false until the tank has been collected
+    // at least once this session (no NVS persistence — the GCS
+    // journals the EVT,Cx,COLLECTED stream into its DB).
+    struct Collection {
+        long     lat        = 0;
+        long     lon        = 0;
+        uint16_t year       = 0;
+        uint8_t  month      = 0;
+        uint8_t  day        = 0;
+        uint8_t  hour       = 0;
+        uint8_t  minute     = 0;
+        uint8_t  second     = 0;
+        bool     fix_valid  = false;   // GPS fix at moment of capture
+        bool     valid      = false;   // any collection happened yet
+    };
+
     Clock&     clock_;
     RadioLink& radio_;
     SystemMode mode_ = SystemMode::IDLE;
     bool mode_changed_ = false;
     Sampler tanks_[3];
+    Collection collections_[3];
     BatteryMonitor* battery_ = nullptr;
     ServoBus*       servo_bus_ = nullptr;
     PumpControl*    pump_control_ = nullptr;
+    LevelSensor*    level_sensor_ = nullptr;
+    GpsLink*        gps_ = nullptr;
 
     // Command handlers
     void cmd_start_tank(uint8_t idx, const char* verb);
@@ -86,7 +120,11 @@ private:
     void cmd_servo_bcast_set_id(const char* verb, const char* args, size_t args_len);
     void cmd_servo_ping(const char* verb, const char* args, size_t args_len);
     void cmd_pump(const char* verb, const char* args, size_t args_len);
+    void cmd_level(const char* verb, const char* args, size_t args_len);
+    void cmd_level_diag(const char* verb, const char* args, size_t args_len);
     void cmd_gpio(const char* verb, const char* args, size_t args_len);
+    void cmd_gps(const char* verb, const char* args, size_t args_len);
+    void cmd_collections(const char* verb);
 
     void set_mode(SystemMode m);
     bool any_tank_sampling() const;
@@ -105,6 +143,11 @@ private:
 
     // Drive the tank's pump on PUMPING entry, off on any other step.
     void drive_pump_for_step(const Sampler& tank);
+
+    // Geo-tag the per-tank collection on STATE -> FULL and emit
+    // EVT,Cx,COLLECTED,... . No-op if GPS not attached.
+    void capture_collection(uint8_t idx);
+    void emit_collection(uint8_t idx);
 
     void send_payload(const char* payload);
 

@@ -47,22 +47,39 @@ enum class TankStep : uint8_t {
 };
 
 // Mock step durations used during the skeleton phase. With real
-// hardware, sensor inputs replace these timers.
+// hardware, sensor inputs replace these timers — but PUMPING_MS is
+// still used as a fallback when no level sensor is attached, and
+// PUMPING_TIMEOUT_MS is the hard safety cap that ends PUMPING even
+// when a sensor is attached but never fires (broken sensor, clogged
+// hose, etc.).
 namespace mock_timing {
-    constexpr uint32_t DESCENDING_MS = 3000;
-    constexpr uint32_t IN_WATER_MS   = 500;
-    constexpr uint32_t PUMPING_MS    = 2000;
-    constexpr uint32_t ASCENDING_MS  = 3000;
-    constexpr uint32_t HOME_MS       = 500;
+    constexpr uint32_t DESCENDING_MS     = 3000;
+    constexpr uint32_t IN_WATER_MS       = 500;
+    constexpr uint32_t PUMPING_MS        = 2000;     // no-sensor fallback
+    constexpr uint32_t PUMPING_TIMEOUT_MS = 30000;   // with-sensor hard cap
+    constexpr uint32_t ASCENDING_MS      = 3000;
+    constexpr uint32_t HOME_MS           = 500;
 }
 
 class Sampler {
 public:
+    // Optional per-tank "is this tank full?" probe. When set, the
+    // PUMPING step ends as soon as this returns true (level sensor
+    // reports liquid present) instead of after PUMPING_MS. A hard
+    // PUMPING_TIMEOUT_MS still applies as a safety cap. When unset,
+    // PUMPING falls back to the mock PUMPING_MS timer so unit tests
+    // and the classic dev board still work unchanged.
+    using LevelSensorFn = bool (*)(uint8_t tank_id, void* ctx);
+
     Sampler(uint8_t id, Clock& clock);
 
     // Request a new sampling cycle. Returns false if the tank is not
     // EMPTY (already SAMPLING, FULL, or FAULT).
     bool request_start();
+
+    // Attach a level-sensor probe used during PUMPING. Pass nullptr
+    // to detach and fall back to mock-timer behaviour.
+    void set_level_sensor(LevelSensorFn fn, void* ctx);
 
     // Force this tank to FAULT immediately. No-op if already FAULT.
     // Used by E-STOP. Step is cleared to NONE.
@@ -93,6 +110,8 @@ private:
     uint32_t  step_entered_ms_ = 0;
     bool state_changed_ = false;
     bool step_changed_  = false;
+    LevelSensorFn level_sensor_     = nullptr;
+    void*         level_sensor_ctx_ = nullptr;
 
     void enter_state(TankState s);
     void enter_step(TankStep s);

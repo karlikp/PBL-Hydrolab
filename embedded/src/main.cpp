@@ -34,6 +34,8 @@
 #  include "BatteryMonitor.h"
 #  include "Clock.h"
 #  include "FrameCodec.h"
+#  include "GpsLink.h"
+#  include "LevelSensor.h"
 #  include "MissionControl.h"
 #  include "PumpControl.h"
 #  include "RadioLink.h"
@@ -51,6 +53,10 @@ constexpr int POWER_LATCH_PIN = 4;
 
 // Battery voltage sense (divider on the schematic: R18 upper, R19 lower).
 constexpr int BATTERY_ADC_PIN = 5;
+
+// I2C bus for the NEO-M8U GPS module on the production board.
+constexpr int GPS_SDA_PIN = 8;
+constexpr int GPS_SCL_PIN = 9;
 
 constexpr const char* FIRMWARE_VERSION = "0.1.0-skeleton";
 
@@ -81,18 +87,19 @@ void early_board_init() {
 
 RealClock g_clock;
 
-#ifdef BOARD_ESP32_S3
+#if defined(BOARD_ESP32_S3) && !defined(UART0_PROTOCOL_LINK)
 // Production: radio is the operator link; UART0 is dedicated to servos.
 RadioTransport g_radio_transport(Serial1);
 RadioLink      g_radio(g_radio_transport.stream());
 ServoBus       g_servo_bus(Serial);
 #else
-// Classic dev board: protocol over CP210x on Serial. No real radio or
-// servo HW present, but ServoBus still constructs cleanly so the same
-// MissionControl code path compiles.
+// Classic dev board OR S3 bench mode (UART0_PROTOCOL_LINK): protocol
+// over CP210x on Serial. ServoBus still constructs cleanly so the
+// same MissionControl code path compiles, but the bus is never wired
+// to MissionControl in this mode.
 constexpr uint32_t DEV_LINK_BAUD = 115200;
 RadioLink      g_radio(Serial);
-ServoBus       g_servo_bus(Serial);  // unused in classic, no real bus
+ServoBus       g_servo_bus(Serial);
 #endif
 
 MissionControl g_controller(g_clock, g_radio);
@@ -100,6 +107,8 @@ Telemetry      g_telemetry(g_clock, g_radio);
 #ifdef BOARD_ESP32_S3
 BatteryMonitor g_battery(g_clock, g_radio, BATTERY_ADC_PIN, POWER_LATCH_PIN);
 PumpControl    g_pumps;
+LevelSensor    g_levels;
+GpsLink        g_gps(g_clock);
 #endif
 
 void on_frame(void* /*ctx*/, frame::Type type,
@@ -244,12 +253,17 @@ void setup() {
     // Power latch + WiFi/BT off — must run before anything else.
     early_board_init();
 
+#  ifdef UART0_PROTOCOL_LINK
+    // Bench mode: protocol over CP210x on UART0 default pins. No
+    // radio init, no servo bus — see env esp32s3wroom1-uartlink.
+    Serial.begin(DEV_LINK_BAUD);
+#  else
     // UART0 → servo bus (swapped TX=44/RX=43). Operator comms is on
     // the radio (Serial1), set up just below.
     Serial.begin(ServoBus::DEFAULT_BAUD, SERIAL_8N1,
                  ServoBus::RX_PIN, ServoBus::TX_PIN);
-
     g_radio_transport.begin();
+#  endif
 #else
     // Classic dev board: just open the CP210x link.
     Serial.begin(DEV_LINK_BAUD);
@@ -259,11 +273,20 @@ void setup() {
     g_radio.on_frame(on_frame, nullptr);
 
 #ifdef BOARD_ESP32_S3
-    g_battery.begin();
     g_pumps.begin();
+    g_levels.begin();
+    g_gps.begin(GPS_SDA_PIN, GPS_SCL_PIN);
+#  ifndef UART0_PROTOCOL_LINK
+    // Bench mode (USB-powered, CP210x link) reads ~5 V on the battery
+    // ADC and would immediately trip CRITICAL → drop the power latch
+    // → kill the board. Skip the monitor entirely in that build.
+    g_battery.begin();
     g_controller.set_battery_monitor(&g_battery);
     g_controller.set_servo_bus(&g_servo_bus);
+#  endif
     g_controller.set_pump_control(&g_pumps);
+    g_controller.set_level_sensor(&g_levels);
+    g_controller.set_gps_link(&g_gps);
 #endif
 
     g_controller.boot(FIRMWARE_VERSION);
@@ -274,7 +297,27 @@ void loop() {
     g_controller.tick();
     g_telemetry.tick();
 #ifdef BOARD_ESP32_S3
+#  ifndef UART0_PROTOCOL_LINK
     g_battery.tick();
+#  endif
+    g_gps.tick();
+    if (g_gps.consume_changed()) {
+        // Push the latest GPS fix into the next TLM emission. Other
+        // Telemetry fields (cond / temp / ph / oxygen / water_flag)
+        // stay at whatever the sensor drivers last set them to.
+        const GpsLink::Fix& f = g_gps.last_fix();
+        Telemetry::Sample s;
+        s.lat       = f.lat;
+        s.lon       = f.lon;
+        s.year      = f.year;
+        s.month     = f.month;
+        s.day       = f.day;
+        s.hour      = f.hour;
+        s.minute    = f.minute;
+        s.second    = f.second;
+        s.fix_valid = f.fix_valid;
+        g_telemetry.update(s);
+    }
 #endif
     delay(5);
 }

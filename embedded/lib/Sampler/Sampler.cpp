@@ -3,6 +3,11 @@
 Sampler::Sampler(uint8_t id, Clock& clock)
     : id_(id), clock_(clock) {}
 
+void Sampler::set_level_sensor(LevelSensorFn fn, void* ctx) {
+    level_sensor_     = fn;
+    level_sensor_ctx_ = ctx;
+}
+
 bool Sampler::request_start() {
     if (state_ != TankState::EMPTY) return false;
     enter_state(TankState::SAMPLING);
@@ -37,7 +42,21 @@ void Sampler::tick() {
             if (elapsed >= mock_timing::IN_WATER_MS) enter_step(TankStep::PUMPING);
             break;
         case TankStep::PUMPING:
-            if (elapsed >= mock_timing::PUMPING_MS) enter_step(TankStep::ASCENDING);
+            if (level_sensor_) {
+                // Real sensor wired: stop pumping as soon as the
+                // sensor reports the tank is full. Safety cap so a
+                // stuck/broken sensor can't keep the pump running
+                // forever.
+                const bool full = level_sensor_(id_, level_sensor_ctx_);
+                if (full || elapsed >= mock_timing::PUMPING_TIMEOUT_MS) {
+                    enter_step(TankStep::ASCENDING);
+                }
+            } else {
+                // No sensor: fall back to fixed mock duration.
+                if (elapsed >= mock_timing::PUMPING_MS) {
+                    enter_step(TankStep::ASCENDING);
+                }
+            }
             break;
         case TankStep::ASCENDING:
             if (elapsed >= mock_timing::ASCENDING_MS) enter_step(TankStep::HOME);

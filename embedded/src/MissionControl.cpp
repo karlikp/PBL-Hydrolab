@@ -9,6 +9,10 @@
 #include "Clock.h"
 #include "ServoBus.h"
 #include "PumpControl.h"
+#include "LevelSensor.h"
+#include "GpsLink.h"
+
+#include <driver/gpio.h>
 
 namespace {
 
@@ -28,6 +32,21 @@ MissionControl::MissionControl(Clock& clock, RadioLink& radio)
       radio_(radio),
       tanks_{ Sampler(1, clock), Sampler(2, clock), Sampler(3, clock) } {}
 
+// Bridge from Sampler's typed callback into the LevelSensor singleton.
+// Sampler::LevelSensorFn passes the tank id + a void* ctx; we use the
+// ctx to carry the LevelSensor pointer so this stays a plain function.
+static bool sampler_level_probe(uint8_t tank_id, void* ctx) {
+    auto* ls = static_cast<LevelSensor*>(ctx);
+    return ls && ls->is_full(tank_id);
+}
+
+void MissionControl::set_level_sensor(LevelSensor* ls) {
+    level_sensor_ = ls;
+    for (auto& tank : tanks_) {
+        tank.set_level_sensor(ls ? &sampler_level_probe : nullptr, ls);
+    }
+}
+
 void MissionControl::boot(const char* version) {
     emit_boot(version);
 }
@@ -35,8 +54,20 @@ void MissionControl::boot(const char* version) {
 void MissionControl::tick() {
     for (auto& t : tanks_) t.tick();
 
-    for (auto& t : tanks_) {
-        if (t.consume_state_change()) emit_tank_state(t);
+    for (size_t i = 0; i < 3; ++i) {
+        auto& t = tanks_[i];
+        if (t.consume_state_change()) {
+            emit_tank_state(t);
+            // Capture geo-tag the instant a tank reaches FULL. GPS
+            // poll is 1 Hz so the fix may be up to ~1 s stale; for
+            // hydrology-scale sample provenance that's well below GPS
+            // accuracy. fix_valid=false captures the (rare) case where
+            // a collection finished before the module had a lock.
+            if (t.state() == TankState::FULL) {
+                capture_collection(static_cast<uint8_t>(i));
+                emit_collection(static_cast<uint8_t>(i));
+            }
+        }
         if (t.consume_step_change()) {
             emit_tank_step(t);
             drive_servo_for_step(t);
@@ -123,11 +154,27 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
         const size_t args_len = static_cast<size_t>(end - args);
         cmd_pump(verb, args, args_len);
     }
+    else if (matches("LEVEL")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_level(verb, args, args_len);
+    }
+    else if (matches("LEVEL_DIAG")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_level_diag(verb, args, args_len);
+    }
     else if (matches("GPIO")) {
         const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
         const size_t args_len = static_cast<size_t>(end - args);
         cmd_gpio(verb, args, args_len);
     }
+    else if (matches("GPS")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_gps(verb, args, args_len);
+    }
+    else if (matches("COLLECTIONS"))     cmd_collections(verb);
     else                                 emit_nack(verb, "unknown_command");
 }
 
@@ -365,6 +412,12 @@ void MissionControl::cmd_status(const char* verb) {
     emit_ack(verb);
     emit_sys_state();
     for (auto& t : tanks_) emit_tank_state(t);
+    // Per-tank geo-tag history (only tanks that have ever been
+    // collected this session). Lets a reconnecting GCS rebuild the
+    // collection table without having to replay the EVT log.
+    for (uint8_t i = 0; i < 3; ++i) {
+        if (collections_[i].valid) emit_collection(i);
+    }
     // Elmetron isn't implemented yet; report DOCKED placeholder so the
     // GCS has a complete snapshot to render.
     send_payload("EVT,ELMETRON,STATE,DOCKED");
@@ -471,6 +524,119 @@ void MissionControl::cmd_pump(const char* verb, const char* args, size_t args_le
     emit_ack(verb);
 }
 
+// CMD,LEVEL_DIAG,<id> — probe the level-sensor GPIO under three
+// different pull configurations to figure out what is actually driving
+// the line.
+//
+// Emits  EVT,SYS,LEVEL_DIAG,id=N,nopull=A,pullup=B,pulldown=C
+//
+// How to read the result (assume sensor connected and we ran this in
+// one state — say, dry):
+//
+//   A=0, B=1, C=0  -> nothing driving the line; reading is determined
+//                     entirely by the internal pull. Sensor is in
+//                     high-Z or disconnected.
+//   A=1, B=1, C=1  -> something is ACTIVELY driving the line HIGH
+//                     (~5 V); our internal ~45 kΩ pulls can't fight
+//                     it. If this stays the same wet vs. dry, the
+//                     sensor is stuck (not switching) or something
+//                     other than the sensor is asserting HIGH.
+//   A=0, B=0, C=0  -> something is actively driving the line LOW.
+//   A=1, B=1, C=0  -> conflicting; usually means a weak external
+//                     drive that pull-down can fight but pull-up
+//                     reinforces. Hardware issue worth poking.
+//
+// After the probe the pin is restored to LevelSensor's default
+// configuration so subsequent CMD,LEVEL calls work as before.
+void MissionControl::cmd_level_diag(const char* verb,
+                                    const char* args,
+                                    size_t args_len) {
+    if (!level_sensor_) {
+        emit_nack(verb, "no_level_sensor");
+        return;
+    }
+    char buf[8] = {0};
+    if (args_len == 0 || args_len >= sizeof(buf)) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    memcpy(buf, args, args_len);
+    const int id = atoi(buf);
+    if (id < 1 || id > 3) {
+        emit_nack(verb, "out_of_range");
+        return;
+    }
+
+    // Match LevelSensor's pin layout.
+    int pin = -1;
+    switch (id) {
+        case 1: pin = LevelSensor::TOPCN1_PIN; break;
+        case 2: pin = LevelSensor::TOPCN2_PIN; break;
+        case 3: pin = LevelSensor::TOPCN3_PIN; break;
+    }
+
+    auto probe = [pin](gpio_pullup_t pu, gpio_pulldown_t pd) -> int {
+        gpio_config_t cfg = {
+            .pin_bit_mask = 1ULL << pin,
+            .mode         = GPIO_MODE_INPUT,
+            .pull_up_en   = pu,
+            .pull_down_en = pd,
+            .intr_type    = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&cfg);
+        delay(5);                // let the line settle
+        return digitalRead(pin);
+    };
+
+    const int a = probe(GPIO_PULLUP_DISABLE, GPIO_PULLDOWN_DISABLE);  // no pull
+    const int b = probe(GPIO_PULLUP_ENABLE,  GPIO_PULLDOWN_DISABLE);  // pull-up
+    const int c = probe(GPIO_PULLUP_DISABLE, GPIO_PULLDOWN_ENABLE);   // pull-down
+
+    // Restore to LevelSensor's preferred config (pull-down).
+    probe(GPIO_PULLUP_DISABLE, GPIO_PULLDOWN_ENABLE);
+
+    char ev[96];
+    snprintf(ev, sizeof(ev),
+             "EVT,SYS,LEVEL_DIAG,id=%d,nopull=%d,pullup=%d,pulldown=%d",
+             id, a, b, c);
+    send_payload(ev);
+    emit_ack(verb);
+}
+
+// CMD,LEVEL,<id> — read the FS-IR12 optical level sensor for tank
+// <id> and emit `EVT,SYS,LEVEL,id=N,full=0|1,raw=0|1`. The `full`
+// field is the interpreted state (after ACTIVE_LOW inversion);
+// `raw` is the actual digitalRead value so the operator can tell a
+// missing/disconnected sensor (reads HIGH=1 due to the external
+// pull-up on the PCB) apart from a sensor reading "not full".
+void MissionControl::cmd_level(const char* verb, const char* args, size_t args_len) {
+    if (!level_sensor_) {
+        emit_nack(verb, "no_level_sensor");
+        return;
+    }
+
+    char buf[8] = {0};
+    if (args_len == 0 || args_len >= sizeof(buf)) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    memcpy(buf, args, args_len);
+    const int id = atoi(buf);
+    if (id < 1 || id > 3) {
+        emit_nack(verb, "out_of_range");
+        return;
+    }
+
+    const bool full = level_sensor_->is_full(static_cast<uint8_t>(id));
+    const int  raw  = level_sensor_->raw(static_cast<uint8_t>(id));
+    char ev[64];
+    snprintf(ev, sizeof(ev),
+             "EVT,SYS,LEVEL,id=%d,full=%d,raw=%d",
+             id, full ? 1 : 0, raw);
+    send_payload(ev);
+    emit_ack(verb);
+}
+
 // Wire Sampler step transitions to the per-tank servo. Sampler IDs
 // 1/2/3 line up 1:1 with servo IDs 1/2/3 (the IDs we programmed via
 // CMD,SERVO_SET_ID). Only DESCENDING and ASCENDING steps actually
@@ -501,6 +667,93 @@ void MissionControl::drive_pump_for_step(const Sampler& tank) {
     if (!pump_control_) return;
     const bool should_pump = (tank.step() == TankStep::PUMPING);
     pump_control_->set(tank.id(), should_pump);
+}
+
+// CMD,GPS,<sub> — sub is STATUS / RAW / RESET.
+//   STATUS → EVT,SYS,GPS,fix=0|1,sats=N,lat=...,lon=...,utc=YYYY-MM-DD HH:MM:SS
+//   RAW    → EVT,SYS,GPS_RAW,lat=...,lon=...,sats=N,present=0|1
+//   RESET  → re-run the u-blox bring-up sequence on the existing bus.
+void MissionControl::cmd_gps(const char* verb, const char* args, size_t args_len) {
+    if (!gps_) { emit_nack(verb, "no_gps"); return; }
+
+    char sub[12] = {0};
+    if (args_len == 0 || args_len >= sizeof(sub)) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    memcpy(sub, args, args_len);
+
+    if (strcmp(sub, "STATUS") == 0) {
+        const auto& f = gps_->last_fix();
+        char ev[128];
+        snprintf(ev, sizeof(ev),
+                 "EVT,SYS,GPS,fix=%d,sats=%u,lat=%ld,lon=%ld,utc=%04u-%02u-%02u %02u:%02u:%02u",
+                 f.fix_valid ? 1 : 0, f.sat_count, f.lat, f.lon,
+                 f.year, f.month, f.day, f.hour, f.minute, f.second);
+        send_payload(ev);
+        emit_ack(verb);
+    } else if (strcmp(sub, "RAW") == 0) {
+        const auto& f = gps_->last_fix();
+        char ev[96];
+        snprintf(ev, sizeof(ev),
+                 "EVT,SYS,GPS_RAW,lat=%ld,lon=%ld,sats=%u,present=%d",
+                 f.lat, f.lon, f.sat_count, gps_->present() ? 1 : 0);
+        send_payload(ev);
+        emit_ack(verb);
+    } else if (strcmp(sub, "RESET") == 0) {
+        const bool ok = gps_->reinit();
+        char ev[48];
+        snprintf(ev, sizeof(ev), "EVT,SYS,GPS_RESET,ok=%d", ok ? 1 : 0);
+        send_payload(ev);
+        if (ok) emit_ack(verb); else emit_nack(verb, "reinit_failed");
+    } else {
+        emit_nack(verb, "bad_args");
+    }
+}
+
+// CMD,COLLECTIONS — dump the per-tank geo-tag captured at the moment
+// each tank reached FULL this session. Tanks that haven't been
+// collected emit valid=0 with zeroed fields.
+void MissionControl::cmd_collections(const char* verb) {
+    emit_ack(verb);
+    for (uint8_t i = 0; i < 3; ++i) emit_collection(i);
+}
+
+// Snapshot the current GPS fix into the tank's Collection slot.
+// Captures even when fix_valid=false so the GCS can record that a
+// pre-fix collection happened (rare in field use, common during
+// bench bring-up).
+void MissionControl::capture_collection(uint8_t idx) {
+    if (idx >= 3) return;
+    Collection& c = collections_[idx];
+    if (gps_) {
+        const auto& f = gps_->last_fix();
+        c.lat       = f.lat;
+        c.lon       = f.lon;
+        c.year      = f.year;
+        c.month     = f.month;
+        c.day       = f.day;
+        c.hour      = f.hour;
+        c.minute    = f.minute;
+        c.second    = f.second;
+        c.fix_valid = f.fix_valid;
+    } else {
+        c = Collection{};   // no GPS attached: leave everything zero
+    }
+    c.valid = true;
+}
+
+void MissionControl::emit_collection(uint8_t idx) {
+    if (idx >= 3) return;
+    const Collection& c = collections_[idx];
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "EVT,%s,COLLECTED,valid=%d,fix=%d,lat=%ld,lon=%ld,utc=%04u-%02u-%02u %02u:%02u:%02u",
+             tank_source(idx),
+             c.valid ? 1 : 0, c.fix_valid ? 1 : 0,
+             c.lat, c.lon,
+             c.year, c.month, c.day, c.hour, c.minute, c.second);
+    send_payload(buf);
 }
 
 void MissionControl::emit_boot(const char* version) {
