@@ -22,6 +22,15 @@ To find the COM port on Windows: open **Device Manager → Ports (COM &
 LPT)**. The CP210x adapter shows as "Silicon Labs CP210x"; the radio's
 FTDI shows as "USB Serial Port".
 
+> **Which shell is my VS Code terminal?** On Windows the integrated
+> terminal defaults to **PowerShell** — use the PowerShell command
+> blocks. Check (or change) the shell via the **˅ dropdown** next to
+> the `+` in the terminal panel: if it says *PowerShell*, use the
+> PowerShell blocks; if *Command Prompt*, use the `cmd` blocks; if
+> *Git Bash* or *WSL*, use the Linux/macOS blocks. For `pio` commands
+> specifically, open the **PlatformIO Core CLI** terminal (see below) —
+> a plain terminal won't have `pio` on `PATH`.
+
 ## VS Code extension (no CLI)
 
 If you use the **PlatformIO VS Code extension** instead of the command

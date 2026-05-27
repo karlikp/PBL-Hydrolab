@@ -17,6 +17,12 @@ the OS. On Linux that's `/dev/ttyUSB0` (CP210x bench) or `/dev/ttyUSB1`
 (FTDI radio); on Windows it's a `COMx` port — find it in **Device
 Manager → Ports (COM & LPT)**.
 
+> Running this from the **VS Code integrated terminal** on Windows? It
+> defaults to **PowerShell**, so use the PowerShell block. Check the
+> shell via the **˅ dropdown** next to the `+` in the terminal panel —
+> if it says *Command Prompt* use the cmd block, if *Git Bash* / *WSL*
+> use the Linux/macOS block.
+
 **Linux / macOS:**
 
 ```bash
