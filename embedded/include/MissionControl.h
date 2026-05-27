@@ -38,6 +38,22 @@ enum class SystemMode : uint8_t {
     E_STOP,
 };
 
+// Runtime-provisioned mapping from a logical tank to the physical
+// channel it's wired to. Provisioned by the GCS via CMD,CFG so a rig
+// plugged together differently can be remapped without reflashing.
+// Defaults match the historical 1:1 wiring (tank N → channel/servo N),
+// so an un-provisioned board behaves exactly as before.
+struct TankConfig {
+    bool    enabled  = true;
+    uint8_t channel  = 1;   // 1..3 — the fixed PUMP+TOPCN pair
+    uint8_t servo_id = 1;   // SC-09 bus address of this tank's winch
+};
+
+struct SystemConfig {
+    uint32_t   pumping_timeout_ms = 90000;
+    TankConfig tanks[3];
+};
+
 class MissionControl {
 public:
     MissionControl(Clock& clock, RadioLink& radio);
@@ -56,6 +72,12 @@ public:
     void handle_command(const char* payload, size_t payload_len);
 
     SystemMode mode() const { return mode_; }
+
+    // Called by the Sampler level-probe bridge: is the tank "full"?
+    // Maps the logical tank (1..3) to its provisioned physical sensor
+    // channel before reading. Public so the file-scope bridge function
+    // in the .cpp can reach it.
+    bool tank_full(uint8_t tank_id);
 
     // Optional: attach the battery monitor so STATUS responses include
     // current battery voltage. nullptr is fine (e.g. on classic env).
@@ -116,6 +138,7 @@ private:
     bool mode_changed_ = false;
     Sampler tanks_[3];
     Collection collections_[3];
+    SystemConfig config_;
     BatteryMonitor* battery_ = nullptr;
     ServoBus*       servo_bus_ = nullptr;
     PumpControl*    pump_control_ = nullptr;
@@ -145,6 +168,8 @@ private:
     void cmd_gpio(const char* verb, const char* args, size_t args_len);
     void cmd_gps(const char* verb, const char* args, size_t args_len);
     void cmd_collections(const char* verb);
+    void cmd_cfg(const char* verb, const char* args, size_t args_len);
+    void cmd_cfg_get(const char* verb);
 
     void set_mode(SystemMode m);
     bool any_tank_sampling() const;
@@ -162,6 +187,11 @@ private:
     void emit_elmetron_state();
     void emit_elmetron_step();
     void emit_boot(const char* version);
+    void emit_cfg();  // EVT,SYS,CFG,... active provisioned config
+
+    // Push the active config into the per-tank Samplers (timeout) and
+    // anywhere else that caches it. Call after config_ changes.
+    void apply_config();
 
     // Drive the tank's servo on DESCENDING/ASCENDING step entries.
     void drive_servo_for_step(const Sampler& tank);

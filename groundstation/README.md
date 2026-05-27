@@ -193,13 +193,18 @@ Provisioning is pushed on GCS startup, on every save, and automatically
 on every `EVT,SYS,BOOT` (so a mid-mission ESP reboot re-syncs — the ESP
 holds config in RAM only, no firmware persistence).
 
-> **Firmware side is not built yet.** The provisioning *protocol*
-> (`CMD,CFG,to=<sec>,C1=<en>:<ch>:<servo>,…` set + `CMD,CFG_GET` →
-> `EVT,SYS,CFG,…` readback) is implemented on the GCS, but current
-> firmware doesn't understand `CFG` and will NACK it — so the status
-> shows `unsupported` until the firmware phase lands. The GCS-side
-> behaviour (enable/disable, channel-aware level polling, persisted
-> serial config) works today regardless.
+The firmware honours the provisioned mapping: a logical tank drives its
+configured servo id + pump/sensor channel, `START_Cx` for a disabled
+tank NACKs `disabled`, and the global pumping timeout is applied.
+`CMD,CFG_GET` (and `CMD,STATUS`) echo the active config back as
+`EVT,SYS,CFG,…`, which the GCS compares to confirm `provisioned`.
+
+> **Testing without peripherals:** flash the classic dev-kit env
+> (`esp32doit-devkit-v1`) — it's peripheral-free (protocol over USB at
+> 115200, FSM on mock timers) and runs the same `MissionControl`, so
+> the full provisioning loop (set → readback → `provisioned`,
+> disabled-tank NACK) is exercisable on a bare dev-kit board. Point the
+> settings page's serial port at the dev-kit's port @ 115200.
 
 ## What gets logged where
 

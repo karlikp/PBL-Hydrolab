@@ -189,18 +189,3 @@ def channel_to_tank(cfg: dict) -> dict[int, str]:
     """Reverse map: physical channel → logical tank (enabled only)."""
     return {cfg["tanks"][tid]["channel"]: tid
             for tid in TANK_IDS if cfg["tanks"][tid].get("enabled")}
-
-
-def provisioning_payload(cfg: dict) -> str:
-    """Build the CMD,CFG provisioning string (without the CMD, prefix).
-
-    Format:  CFG,to=<sec>,C1=<en>:<ch>:<servo>,C2=...,C3=...
-    e.g.     CFG,to=90,C1=1:1:1,C2=1:2:2,C3=0:3:3
-    Compact enough for one ~45-byte frame so provisioning is atomic.
-    """
-    to = int(cfg["global"]["pumping_timeout_s"])
-    parts = [f"to={to}"]
-    for tid in TANK_IDS:
-        t = cfg["tanks"][tid]
-        parts.append(f"{tid}={1 if t['enabled'] else 0}:{t['channel']}:{t['servo_id']}")
-    return "CFG," + ",".join(parts)

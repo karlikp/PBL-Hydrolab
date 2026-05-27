@@ -31,20 +31,42 @@ constexpr uint16_t SAMPLER_UNROLLED_POSITION = 1000;
 MissionControl::MissionControl(Clock& clock, RadioLink& radio)
     : clock_(clock),
       radio_(radio),
-      tanks_{ Sampler(1, clock), Sampler(2, clock), Sampler(3, clock) } {}
+      tanks_{ Sampler(1, clock), Sampler(2, clock), Sampler(3, clock) } {
+    // Default config = historical 1:1 wiring (tank N → channel/servo N),
+    // so an un-provisioned board behaves exactly as before the config
+    // layer existed.
+    for (uint8_t i = 0; i < 3; ++i) {
+        config_.tanks[i].enabled  = true;
+        config_.tanks[i].channel  = static_cast<uint8_t>(i + 1);
+        config_.tanks[i].servo_id = static_cast<uint8_t>(i + 1);
+    }
+    apply_config();
+}
 
-// Bridge from Sampler's typed callback into the LevelSensor singleton.
-// Sampler::LevelSensorFn passes the tank id + a void* ctx; we use the
-// ctx to carry the LevelSensor pointer so this stays a plain function.
+// Bridge from Sampler's typed callback into MissionControl. The ctx
+// carries the MissionControl* so the probe can map the logical tank id
+// to its provisioned physical sensor channel before reading.
 static bool sampler_level_probe(uint8_t tank_id, void* ctx) {
-    auto* ls = static_cast<LevelSensor*>(ctx);
-    return ls && ls->is_full(tank_id);
+    auto* mc = static_cast<MissionControl*>(ctx);
+    return mc && mc->tank_full(tank_id);
 }
 
 void MissionControl::set_level_sensor(LevelSensor* ls) {
     level_sensor_ = ls;
     for (auto& tank : tanks_) {
-        tank.set_level_sensor(ls ? &sampler_level_probe : nullptr, ls);
+        tank.set_level_sensor(ls ? &sampler_level_probe : nullptr, this);
+    }
+}
+
+// Map logical tank (1..3) → provisioned sensor channel, then read it.
+bool MissionControl::tank_full(uint8_t tank_id) {
+    if (!level_sensor_ || tank_id < 1 || tank_id > 3) return false;
+    return level_sensor_->is_full(config_.tanks[tank_id - 1].channel);
+}
+
+void MissionControl::apply_config() {
+    for (uint8_t i = 0; i < 3; ++i) {
+        tanks_[i].set_pumping_timeout_ms(config_.pumping_timeout_ms);
     }
 }
 
@@ -131,7 +153,8 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
     if (mode_ == SystemMode::E_STOP
         && !matches("RESET_C1") && !matches("RESET_C2") && !matches("RESET_C3")
         && !matches("RESET_ELMETRON")
-        && !matches("STATUS")   && !matches("PING")     && !matches("E_STOP")) {
+        && !matches("STATUS")   && !matches("PING")     && !matches("E_STOP")
+        && !matches("CFG")      && !matches("CFG_GET")) {
         emit_nack(verb, "e_stop_active");
         return;
     }
@@ -198,6 +221,12 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
         cmd_gps(verb, args, args_len);
     }
     else if (matches("COLLECTIONS"))     cmd_collections(verb);
+    else if (matches("CFG_GET"))         cmd_cfg_get(verb);
+    else if (matches("CFG")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_cfg(verb, args, args_len);
+    }
     else                                 emit_nack(verb, "unknown_command");
 }
 
@@ -394,6 +423,7 @@ void MissionControl::cmd_gpio(const char* verb, const char* args, size_t args_le
 void MissionControl::cmd_start_tank(uint8_t idx, const char* verb) {
     Sampler& t = tanks_[idx];
 
+    if (!config_.tanks[idx].enabled)      { emit_nack(verb, "disabled");  return; }
     if (is_busy())                        { emit_nack(verb, "busy");      return; }
     if (t.state() == TankState::FULL)     { emit_nack(verb, "tank_full"); return; }
     if (t.state() == TankState::FAULT)    { emit_nack(verb, "fault");     return; }
@@ -434,7 +464,7 @@ void MissionControl::cmd_stop_tank(uint8_t idx, const char* verb) {
     // The SC-09 is position-controlled — without this it would
     // finish tracking to whatever DESCENDING/ASCENDING endpoint was
     // last commanded, not "stay where it is" as the operator expects.
-    freeze_tank_servo(t.id());
+    freeze_tank_servo(config_.tanks[idx].servo_id);
     t.abort();
     emit_ack(verb);
 }
@@ -487,7 +517,7 @@ void MissionControl::cmd_reset_tank(uint8_t idx, const char* verb) {
     // from HOME, matching the operator-mental-model of "reset = back
     // to ready." The SC-09 is closed-loop, so this is reliable.
     if (servo_bus_) {
-        servo_bus_->move(t.id(), SAMPLER_HOME_POSITION);
+        servo_bus_->move(config_.tanks[idx].servo_id, SAMPLER_HOME_POSITION);
     }
 
     // If E-STOP latched and there are no fault tanks left, drop to IDLE.
@@ -551,6 +581,9 @@ void MissionControl::cmd_status(const char* verb) {
     } else {
         send_payload("EVT,ELMETRON,STATE,DOCKED");
     }
+    // Active provisioned config, so a reconnecting GCS resyncs its
+    // provisioning status from a plain STATUS without a separate CFG_GET.
+    emit_cfg();
     if (battery_) {
         char buf[80];
         snprintf(buf, sizeof(buf), "EVT,SYS,BATTERY,%.2fV/raw=%u/mv=%lu",
@@ -802,12 +835,13 @@ void MissionControl::cmd_level(const char* verb, const char* args, size_t args_l
 // dwells while the rest of the mechanism (pump, end-stops) lands.
 void MissionControl::drive_servo_for_step(const Sampler& tank) {
     if (!servo_bus_) return;
+    const uint8_t servo_id = config_.tanks[tank.id() - 1].servo_id;
     switch (tank.step()) {
         case TankStep::DESCENDING:
-            servo_bus_->move(tank.id(), SAMPLER_UNROLLED_POSITION);
+            servo_bus_->move(servo_id, SAMPLER_UNROLLED_POSITION);
             break;
         case TankStep::ASCENDING:
-            servo_bus_->move(tank.id(), SAMPLER_HOME_POSITION);
+            servo_bus_->move(servo_id, SAMPLER_HOME_POSITION);
             break;
         case TankStep::IN_WATER:
         case TankStep::PUMPING:
@@ -841,7 +875,7 @@ void MissionControl::freeze_tank_servo(uint8_t servo_id) {
 void MissionControl::drive_pump_for_step(const Sampler& tank) {
     if (!pump_control_) return;
     const bool should_pump = (tank.step() == TankStep::PUMPING);
-    pump_control_->set(tank.id(), should_pump);
+    pump_control_->set(config_.tanks[tank.id() - 1].channel, should_pump);
 }
 
 // Drive the Elmetron winch on step transitions.
@@ -971,6 +1005,90 @@ void MissionControl::emit_collection(uint8_t idx) {
              c.valid ? 1 : 0, c.fix_valid ? 1 : 0,
              c.lat, c.lon,
              c.year, c.month, c.day, c.hour, c.minute, c.second);
+    send_payload(buf);
+}
+
+// CMD,CFG,to=<sec>,C1=<en>:<ch>:<servo>,C2=...,C3=... — provision the
+// logical-tank → physical-channel/servo mapping + global timeout. One
+// atomic frame; the whole config lands or none of it. Rejected while
+// busy (don't remap mid-operation). Validated for channel/servo range
+// and uniqueness among enabled tanks before it's committed.
+void MissionControl::cmd_cfg(const char* verb, const char* args, size_t args_len) {
+    if (is_busy()) { emit_nack(verb, "busy"); return; }
+
+    char buf[200];
+    if (args_len == 0 || args_len >= sizeof(buf)) {
+        emit_nack(verb, "bad_args");
+        return;
+    }
+    memcpy(buf, args, args_len);
+    buf[args_len] = '\0';
+
+    // Parse into a temp copy; commit only if the whole thing validates.
+    SystemConfig tmp = config_;
+    char* save = nullptr;
+    for (char* tok = strtok_r(buf, ",", &save); tok;
+         tok = strtok_r(nullptr, ",", &save)) {
+        if (strncmp(tok, "to=", 3) == 0) {
+            const int sec = atoi(tok + 3);
+            if (sec <= 0) { emit_nack(verb, "bad_timeout"); return; }
+            tmp.pumping_timeout_ms = static_cast<uint32_t>(sec) * 1000u;
+        } else if (tok[0] == 'C' && tok[1] >= '1' && tok[1] <= '3'
+                   && tok[2] == '=') {
+            const int idx = tok[1] - '1';
+            int en = 0, ch = 0, sv = 0;
+            if (sscanf(tok + 3, "%d:%d:%d", &en, &ch, &sv) != 3) {
+                emit_nack(verb, "bad_args");
+                return;
+            }
+            if (ch < 1 || ch > 3 || sv < 1 || sv > 253) {
+                emit_nack(verb, "out_of_range");
+                return;
+            }
+            tmp.tanks[idx].enabled  = (en != 0);
+            tmp.tanks[idx].channel  = static_cast<uint8_t>(ch);
+            tmp.tanks[idx].servo_id = static_cast<uint8_t>(sv);
+        }
+        // Unknown tokens ignored (forward-compat per protocol §10).
+    }
+
+    // No two ENABLED tanks may share a channel or a servo id.
+    for (int i = 0; i < 3; ++i) {
+        for (int j = i + 1; j < 3; ++j) {
+            if (!tmp.tanks[i].enabled || !tmp.tanks[j].enabled) continue;
+            if (tmp.tanks[i].channel == tmp.tanks[j].channel) {
+                emit_nack(verb, "dup_channel"); return;
+            }
+            if (tmp.tanks[i].servo_id == tmp.tanks[j].servo_id) {
+                emit_nack(verb, "dup_servo"); return;
+            }
+        }
+    }
+
+    config_ = tmp;
+    apply_config();
+    emit_ack(verb);
+}
+
+// CMD,CFG_GET — dump the active config so the GCS can verify what
+// actually landed (readback closes the provisioning loop over a lossy
+// radio link).
+void MissionControl::cmd_cfg_get(const char* verb) {
+    emit_cfg();
+    emit_ack(verb);
+}
+
+// EVT,SYS,CFG,to=<sec>,C1=<en>:<ch>:<servo>,... — must match the exact
+// string the GCS builds when it provisions, so the readback compares
+// equal. Timeout reported in whole seconds.
+void MissionControl::emit_cfg() {
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+        "EVT,SYS,CFG,to=%lu,C1=%d:%d:%d,C2=%d:%d:%d,C3=%d:%d:%d",
+        static_cast<unsigned long>(config_.pumping_timeout_ms / 1000u),
+        config_.tanks[0].enabled ? 1 : 0, config_.tanks[0].channel, config_.tanks[0].servo_id,
+        config_.tanks[1].enabled ? 1 : 0, config_.tanks[1].channel, config_.tanks[1].servo_id,
+        config_.tanks[2].enabled ? 1 : 0, config_.tanks[2].channel, config_.tanks[2].servo_id);
     send_payload(buf);
 }
 

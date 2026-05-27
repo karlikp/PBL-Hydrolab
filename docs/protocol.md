@@ -172,6 +172,7 @@ EVT,<source>,<kind>,<details>*<checksum>
 | `STATE`  | `C1`/`C2`/`C3`           | `EMPTY`, `SAMPLING`, `FULL`, `FAULT` |
 | `STATE`  | `ELMETRON`               | `DOCKED`, `MEASURING`, `FAULT`      |
 | `STATE`  | `SYS`                    | `IDLE`, `SAMPLING`, `MEASURING`, `E_STOP` |
+| `CFG`    | `SYS`                    | Active config readback: `to=<sec>,C1=<en>:<ch>:<servo>,C2=...,C3=...` (reply to `CMD,CFG_GET` / `CMD,STATUS`) |
 | `STEP`   | `C1`/`C2`/`C3`/`ELMETRON`| `HOMING` (ELMETRON only), `DESCENDING`, `IN_WATER`, `PUMPING` (C1–C3 only), `ASCENDING`, `HOME` |
 | `ACK`    | `SYS`                    | The command that was accepted (e.g. `START_C1`) |
 | `NACK`   | `SYS`                    | The command and why it was rejected (e.g. `START_C2:busy`) |
@@ -241,8 +242,10 @@ CMD,START_C1,*04AB1234
 | `RESET_C2`         | (same for tank 2)                                             |
 | `RESET_C3`         | (same for tank 3)                                             |
 | `RESET_ELMETRON`   | Clear Elmetron's `FAULT` and move it back to `DOCKED`         |
-| `STATUS`           | Ask the drone for a snapshot — it replies with one `EVT,STATE` per subsystem |
+| `STATUS`           | Ask the drone for a snapshot — it replies with one `EVT,STATE` per subsystem plus `EVT,SYS,CFG` |
 | `PING`             | Check the link is alive — drone responds `EVT,SYS,ACK,PING`   |
+| `CFG`              | Provision the tank→channel/servo mapping + global timeout. Format: `CMD,CFG,to=<sec>,C1=<en>:<ch>:<servo>,C2=...,C3=...` (e.g. `CMD,CFG,to=90,C1=1:1:1,C2=1:2:2,C3=0:3:3`). Rejected while busy. Held in RAM only — re-sent by the GCS on every boot. |
+| `CFG_GET`          | Drone replies `EVT,SYS,CFG,...` with its active config (readback to confirm provisioning) |
 
 ### What happens after you send a CMD
 
@@ -268,6 +271,9 @@ keep listening for the follow-up `STEP` and `STATE` events.
 | `not_running`       | `STOP_*` was sent against a subsystem that isn't currently active   |
 | `not_in_fault`      | `RESET_ELMETRON` was sent while Elmetron wasn't in `FAULT`           |
 | `not_implemented`   | The targeted subsystem isn't attached on this build                 |
+| `disabled`          | `START_Cx` for a tank disabled in the provisioned config            |
+| `dup_channel` / `dup_servo` | `CMD,CFG` had two enabled tanks sharing a channel or servo id |
+| `out_of_range` / `bad_timeout` | `CMD,CFG` value outside the valid range              |
 | `e_stop_active`     | Drone is in E-STOP mode — only `RESET_*` and `STATUS` work until reset |
 | `unknown_command`   | The drone doesn't recognise this command (version mismatch?)         |
 

@@ -48,7 +48,7 @@ void Sampler::tick() {
                 // stuck/broken sensor can't keep the pump running
                 // forever.
                 const bool full = level_sensor_(id_, level_sensor_ctx_);
-                if (full || elapsed >= mock_timing::PUMPING_TIMEOUT_MS) {
+                if (full || elapsed >= pumping_timeout_ms_) {
                     enter_step(TankStep::ASCENDING);
                 }
             } else {

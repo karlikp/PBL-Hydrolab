@@ -81,6 +81,13 @@ public:
     // to detach and fall back to mock-timer behaviour.
     void set_level_sensor(LevelSensorFn fn, void* ctx);
 
+    // Override the PUMPING safety-timeout (the hard cap that ends
+    // PUMPING when a sensor is attached but never fires). Provisioned
+    // at runtime from the GCS config; defaults to the compile-time
+    // mock_timing value. Only meaningful when a level sensor is set —
+    // the no-sensor path uses the fixed mock PUMPING_MS.
+    void set_pumping_timeout_ms(uint32_t ms) { pumping_timeout_ms_ = ms; }
+
     // Force this tank to FAULT immediately. No-op if already FAULT.
     // Used by E-STOP. Step is cleared to NONE.
     void abort();
@@ -112,6 +119,7 @@ private:
     bool step_changed_  = false;
     LevelSensorFn level_sensor_     = nullptr;
     void*         level_sensor_ctx_ = nullptr;
+    uint32_t      pumping_timeout_ms_ = mock_timing::PUMPING_TIMEOUT_MS;
 
     void enter_state(TankState s);
     void enter_step(TankStep s);

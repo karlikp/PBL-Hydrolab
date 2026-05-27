@@ -251,6 +251,26 @@ embedded/
 | Elmetron probe   | Synthetic ramp readings (no probe driver yet)             | Add real UART driver on ELE_TX (IO18) / ELE_RX (IO17). Cond reading can drive descent-trigger logic (see `project_elmetron_descent_timeout`). |
 | Elmetron winch   | FSM transitions but motor isn't driven                    | WinchH driver: H_EN_L/H_EN_R direction, H_PWM speed, H_LIMIT for HOMING exit. TODOs documented in `drive_elmetron_servo_for_step`. |
 
+## Runtime config (provisioning)
+
+The logical tank → physical channel/servo mapping, per-tank enable, and
+the global PUMPING timeout are **provisioned at runtime** by the GCS via
+`CMD,CFG` — so a rig wired together differently is remapped without
+reflashing. The ESP holds the config in RAM only (no persistence); the
+GCS re-pushes it on every `EVT,SYS,BOOT`. Defaults match the historical
+1:1 wiring (tank N → channel/servo N), so an un-provisioned board
+behaves exactly as before.
+
+- `CMD,CFG,to=<sec>,C1=<en>:<ch>:<servo>,C2=...,C3=...` sets it (one
+  atomic frame; NACK'd while busy or on invalid/duplicate mapping).
+- `CMD,CFG_GET` (and `CMD,STATUS`) reply `EVT,SYS,CFG,...` for readback.
+- A disabled tank NACKs `START_Cx` with `disabled`.
+
+Lives in `MissionControl` (`SystemConfig`), so it works identically on
+the deploy board and the dev-kit. Test it peripheral-free on the dev-kit
+env (`esp32doit-devkit-v1`) over USB — `CMD,CFG_GET` readback and the
+disabled-tank NACK are fully exercisable there.
+
 ## Known hardware caveats
 
 - **SC-09 half-duplex echo.** The library reads its own TX echo on RX,
