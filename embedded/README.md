@@ -2,9 +2,11 @@
 
 ESP32-S3 firmware for the water-quality drone. The command/event
 pipeline, state machines, wire protocol, GPS, level sensors, pumps and
-the SC-09 servo bus are all live on hardware. The Elmetron probe and
-its H-bridge winch are still stubs (driver pending hardware
-integration — see [Mock vs real](#mock-vs-real)).
+the SC-09 servo bus are all live on hardware. The Elmetron probe
+(CX-series UART) and its H-bridge winch now have real drivers too, but
+they're **unverified** — written against the schematic + the legacy
+comms with no Elmetron on hand, so direction/parity/timing constants
+need bench confirmation (see [Mock vs real](#mock-vs-real)).
 
 ## Platform conventions
 
@@ -248,8 +250,8 @@ embedded/
 | BatteryMonitor   | Real but **temporarily disabled in deploy env** (`-DDISABLE_BATTERY_MONITOR` in `platformio.ini`) because R18/R19 divider saturates the ADC above ~9 V. | Once HW team confirms divider rework, drop the flag and restore the 11.0 V / 10.5 V thresholds in `BatteryMonitor.h`. |
 | GpsLink          | Real (u-blox NEO-M8U over I2C). Mock build synthesizes a fixed fix near Warsaw. | —                                       |
 | Telemetry        | Real (probe fields zero outside MEASURING)                | —                                                 |
-| Elmetron probe   | Synthetic ramp readings (no probe driver yet)             | Add real UART driver on ELE_TX (IO18) / ELE_RX (IO17). Cond reading can drive descent-trigger logic (see `project_elmetron_descent_timeout`). |
-| Elmetron winch   | FSM transitions but motor isn't driven                    | WinchH driver: H_EN_L/H_EN_R direction, H_PWM speed, H_LIMIT for HOMING exit. TODOs documented in `drive_elmetron_servo_for_step`. |
+| Elmetron probe   | Real `ElmetronProbe` CX-series UART driver (UART2, IO17/IO18, 115200 8E1) — **UNVERIFIED, no probe on hand**. Ported from the working legacy CX-401 comms: query → parse pH/O₂/cond/temp, water = cond > 0.7 mS/cm. `CMD,ELE` dumps raw readings. | Verify on the bench: parity (8E1↔8N1) and rx/tx orientation are the first flips if it's silent. |
+| Elmetron winch   | Real `WinchH` H-bridge driver (H_EN_L/H_EN_R + 10 kHz PWM, H_LIMIT) — **UNVERIFIED**. Drives UP for HOMING/ASCENDING, DOWN for DESCENDING, stop otherwise. | Confirm direction polarity (`DOWN_IS_EN_L`), limit polarity, PWM duty, and rescale the descent/ascent safety caps for your duty. |
 
 ## Runtime config (provisioning)
 

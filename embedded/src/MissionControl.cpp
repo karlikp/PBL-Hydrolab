@@ -12,6 +12,8 @@
 #include "LevelSensor.h"
 #include "GpsLink.h"
 #include "Telemetry.h"
+#include "ElmetronProbe.h"
+#include "WinchH.h"
 
 #include <driver/gpio.h>
 
@@ -25,6 +27,11 @@ namespace {
 // magic, just commands the SC-09 to these absolute positions.
 constexpr uint16_t SAMPLER_HOME_POSITION     = 0;
 constexpr uint16_t SAMPLER_UNROLLED_POSITION = 1000;
+
+// Elmetron winch drive duty (% of full). The DESCENT/ASCENT safety
+// caps in elmetron_timing:: are sized for roughly this speed — if you
+// change the duty, rescale those caps (slower drive ⇒ longer cap).
+constexpr uint8_t ELMETRON_WINCH_DUTY = 60;
 
 }  // namespace
 
@@ -99,11 +106,16 @@ void MissionControl::tick() {
     }
 
     if (elmetron_) {
+        // Feed hardware-derived triggers (limit switch / water / converge)
+        // BEFORE ticking so the FSM can act on them this cycle.
+        service_elmetron_hardware();
         elmetron_->tick();
         if (elmetron_->consume_state_change()) emit_elmetron_state();
         if (elmetron_->consume_step_change()) {
             emit_elmetron_step();
-            drive_elmetron_servo_for_step();
+            // Reset the convergence window each time we (re)enter IN_WATER.
+            if (elmetron_->step() == ElmetronStep::IN_WATER) conv_.reset();
+            drive_elmetron_winch_for_step();
         }
         push_elmetron_reading();
     }
@@ -221,6 +233,7 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
         cmd_gps(verb, args, args_len);
     }
     else if (matches("COLLECTIONS"))     cmd_collections(verb);
+    else if (matches("ELE"))             cmd_ele(verb);
     else if (matches("CFG_GET"))         cmd_cfg_get(verb);
     else if (matches("CFG")) {
         const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
@@ -494,6 +507,9 @@ void MissionControl::cmd_estop(const char* verb) {
     if (elmetron_ && elmetron_->state() == ElmetronState::MEASURING) {
         elmetron_->abort();
     }
+    // Safety: halt the Elmetron winch immediately (the step-change hook
+    // would also stop it as the FSM drops to NONE, but don't wait).
+    if (winch_) winch_->stop();
     // Safety: force every pump off immediately, regardless of where
     // each Sampler was in its FSM. The step-change hook would do this
     // anyway as tanks transition to FAULT, but the explicit stop_all
@@ -531,6 +547,21 @@ void MissionControl::cmd_reset_tank(uint8_t idx, const char* verb) {
         }
         set_mode(SystemMode::IDLE);
     }
+}
+
+// CMD,ELE — dump the latest raw Elmetron probe reading. Diagnostic for
+// bench bring-up of the CX-series UART before the FSM consumes it.
+//   EVT,SYS,ELE,cond=<mS/cm>,temp=<C>,ph=<>,o2=<mg/L>,water=0|1,present=0|1
+void MissionControl::cmd_ele(const char* verb) {
+    if (!elmetron_probe_) { emit_nack(verb, "no_probe"); return; }
+    const ElmetronProbe::Reading& r = elmetron_probe_->last_reading();
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+        "EVT,SYS,ELE,cond=%.2f,temp=%.2f,ph=%.2f,o2=%.2f,water=%d,present=%d",
+        r.conductivity, r.temperature, r.ph, r.oxygen,
+        r.water ? 1 : 0, elmetron_probe_->present() ? 1 : 0);
+    send_payload(buf);
+    emit_ack(verb);
 }
 
 // CMD,RESET_ELMETRON — clear Elmetron FAULT back to DOCKED. Needed
@@ -878,32 +909,65 @@ void MissionControl::drive_pump_for_step(const Sampler& tank) {
     pump_control_->set(config_.tanks[tank.id() - 1].channel, should_pump);
 }
 
-// Drive the Elmetron winch on step transitions.
-//
-// !!! HARDWARE NOT YET CONNECTED — stub.
-//
-// The Elmetron winch is NOT a servo on the SC-09 bus. Per the board
-// pinout (docs/hardware/board_pinout.pdf), it's a brushed DC motor on
-// a dedicated H-bridge (H_EN_L=IO6, H_EN_R=IO7, H_PWM=IO15) with a
-// single limit switch (H_LIMIT=IO12). A separate `WinchH` driver
-// module will land here once the HW team wires up that subsystem and
-// we can characterise direction polarity, PWM duty, descent time, and
-// limit-switch position on the bench.
-//
-// Today the FSM still ticks through HOMING / DESCENDING / IN_WATER /
-// ASCENDING / HOME on time-based transitions and the protocol-level
-// events still emit correctly — only the physical motion is missing.
-void MissionControl::drive_elmetron_servo_for_step() {
-    // TODO(winch-h): once WinchH driver exists:
-    //   HOMING     → drive UP, monitor H_LIMIT, exit on limit
-    //                or FAULT on HOMING_MAX_MS timeout (the
-    //                step-side timeout in Elmetron::tick is the
-    //                safety bound — this drives the motor)
-    //   DESCENDING → drive DOWN at PWM duty
-    //   IN_WATER   → motor stop (cable held by mechanism / brake)
-    //   ASCENDING  → drive UP, monitor H_LIMIT
-    //   HOME       → motor stop
-    //   NONE       → motor stop (covers abort paths)
+// Recompute Elmetron hardware mode: it's hardware-driven only when BOTH
+// a real probe and a winch are attached. Otherwise the FSM runs its
+// synthetic timer/ramp path so the cycle stays exercisable on the
+// dev-kit / mock builds.
+void MissionControl::update_elmetron_mode() {
+    if (elmetron_) elmetron_->set_hardware_mode(elmetron_probe_ && winch_);
+}
+
+// Drive the winch motor for the current Elmetron step. Set-and-forget:
+// the H-bridge holds the last command until the next step change, so we
+// only act on transitions. STOP on IN_WATER / HOME / NONE (NONE covers
+// abort + FAULT, so the motor always halts when the cycle ends).
+void MissionControl::drive_elmetron_winch_for_step() {
+    if (!winch_ || !elmetron_) return;
+    switch (elmetron_->step()) {
+        case ElmetronStep::HOMING:
+        case ElmetronStep::ASCENDING:
+            winch_->drive(WinchH::Direction::UP, ELMETRON_WINCH_DUTY);
+            break;
+        case ElmetronStep::DESCENDING:
+            winch_->drive(WinchH::Direction::DOWN, ELMETRON_WINCH_DUTY);
+            break;
+        case ElmetronStep::IN_WATER:
+        case ElmetronStep::HOME:
+        case ElmetronStep::NONE:
+            winch_->stop();
+            break;
+    }
+}
+
+// Read the winch limit + probe each tick and fire the FSM's notify
+// triggers for the current step. No-op unless we're in hardware mode
+// and actively measuring.
+void MissionControl::service_elmetron_hardware() {
+    if (!elmetron_ || !winch_ || !elmetron_probe_) return;
+    if (!elmetron_->hardware_mode()) return;
+    if (elmetron_->state() != ElmetronState::MEASURING) return;
+
+    switch (elmetron_->step()) {
+        case ElmetronStep::HOMING:
+        case ElmetronStep::ASCENDING:
+            if (winch_->at_home()) elmetron_->at_home();
+            break;
+        case ElmetronStep::DESCENDING:
+            if (elmetron_probe_->last_reading().water) elmetron_->water_detected();
+            break;
+        case ElmetronStep::IN_WATER:
+            // Sample the conductivity into the convergence window only on
+            // genuinely-new probe frames (~2 Hz), not every loop tick.
+            if (elmetron_probe_->consume_changed()) {
+                conv_.add(clock_.now_ms(),
+                          elmetron_probe_->last_reading().conductivity);
+            }
+            if (conv_.converged(clock_.now_ms())) elmetron_->measurement_done();
+            break;
+        case ElmetronStep::HOME:
+        case ElmetronStep::NONE:
+            break;
+    }
 }
 
 // Push the Elmetron's current reading into Telemetry. While the
@@ -913,11 +977,22 @@ void MissionControl::drive_elmetron_servo_for_step() {
 // stream doesn't carry a stale post-measurement value indefinitely.
 void MissionControl::push_elmetron_reading() {
     if (!telemetry_ || !elmetron_) return;
-    if (elmetron_->state() == ElmetronState::MEASURING) {
+    if (elmetron_->state() != ElmetronState::MEASURING) {
+        telemetry_->clear_measurement();
+        return;
+    }
+    if (elmetron_->hardware_mode() && elmetron_probe_) {
+        // Real probe: stream live readings; measurement_valid flips true
+        // only once we're settled in water (IN_WATER + converged).
+        const ElmetronProbe::Reading& r = elmetron_probe_->last_reading();
+        const bool valid = (elmetron_->step() == ElmetronStep::IN_WATER)
+                           && conv_.converged(clock_.now_ms());
+        telemetry_->update_measurement(r.conductivity, r.temperature,
+                                       r.ph, r.oxygen, valid);
+    } else {
+        // Synthetic (no hardware): the FSM's ramp.
         const Elmetron::Reading r = elmetron_->last_reading();
         telemetry_->update_measurement(r.cond, r.temp, r.ph, r.oxygen, r.valid);
-    } else {
-        telemetry_->clear_measurement();
     }
 }
 

@@ -1,0 +1,56 @@
+// WinchH — H-bridge driver for the Elmetron probe winch.
+//
+// The probe hangs on a brushed DC motor driven by an external H-bridge
+// module on the H_BRIDGE1 connector (the board only routes the signals;
+// the bridge IC is off-board, so the exact EN semantics aren't on the
+// schematic — see ASSUMPTION below). Per the board pinout:
+//
+//     H_EN_L = IO6   direction-select A
+//     H_EN_R = IO7   direction-select B
+//     H_PWM  = IO15  speed (10 kHz PWM, matching the legacy winch)
+//     H_LIMIT= IO12  home limit switch (LIMIT_E connector, switch→GND)
+//
+// !!! UNVERIFIED — no Elmetron hardware on hand. Direction polarity and
+// limit-switch polarity are documented assumptions to confirm on the
+// bench (one-line flips below). The FSM's safety-cap timeouts are the
+// backstop if a polarity is wrong (motor stops on cap → FAULT).
+
+#pragma once
+
+#include <stdint.h>
+
+class WinchH {
+public:
+    enum class Direction : uint8_t { STOP, DOWN, UP };
+
+    WinchH(int en_l_pin, int en_r_pin, int pwm_pin, int limit_pin);
+
+    // Configure pins + the LEDC PWM channel. Call from setup().
+    void begin();
+
+    // Drive the motor. duty_pct 0..100. STOP forces both enables low
+    // and 0 duty. Idempotent — safe to call repeatedly.
+    void drive(Direction dir, uint8_t duty_pct);
+    void stop() { drive(Direction::STOP, 0); }
+
+    // True when the home limit switch is engaged (cable fully retracted).
+    bool at_home() const;
+    int  raw_limit() const;   // diagnostic: unfiltered digitalRead
+
+    static constexpr uint32_t PWM_FREQ_HZ  = 10000;  // legacy ran 10 kHz
+    static constexpr uint8_t  PWM_RES_BITS = 8;      // 0..255 duty
+    static constexpr int      PWM_CHANNEL  = 7;      // LEDC ch (nothing else uses LEDC)
+
+    // ASSUMPTION (verify on bench): DOWN drives with EN_L high / EN_R low.
+    // If the winch travels the wrong way, flip this one bool.
+    static constexpr bool DOWN_IS_EN_L = true;
+
+    // H_LIMIT is a switch to GND with an input pull-up → engaged reads LOW.
+    static constexpr bool LIMIT_ACTIVE_LOW = true;
+
+private:
+    const int en_l_;
+    const int en_r_;
+    const int pwm_;
+    const int limit_;
+};

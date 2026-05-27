@@ -246,6 +246,7 @@ CMD,START_C1,*04AB1234
 | `PING`             | Check the link is alive — drone responds `EVT,SYS,ACK,PING`   |
 | `CFG`              | Provision the tank→channel/servo mapping + global timeout. Format: `CMD,CFG,to=<sec>,C1=<en>:<ch>:<servo>,C2=...,C3=...` (e.g. `CMD,CFG,to=90,C1=1:1:1,C2=1:2:2,C3=0:3:3`). Rejected while busy. Held in RAM only — re-sent by the GCS on every boot. |
 | `CFG_GET`          | Drone replies `EVT,SYS,CFG,...` with its active config (readback to confirm provisioning) |
+| `ELE`              | Diagnostic — drone replies `EVT,SYS,ELE,cond=<mS/cm>,temp=<C>,ph=<>,o2=<mg/L>,water=0\|1,present=0\|1` with the latest raw Elmetron probe reading (`present=0` if no probe is answering on the bus) |
 
 ### What happens after you send a CMD
 

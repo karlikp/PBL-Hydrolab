@@ -34,6 +34,8 @@
 #  include "BatteryMonitor.h"
 #  include "Clock.h"
 #  include "Elmetron.h"
+#  include "ElmetronProbe.h"
+#  include "WinchH.h"
 #  include "FrameCodec.h"
 #  include "GpsLink.h"
 #  include "LevelSensor.h"
@@ -58,6 +60,17 @@ constexpr int BATTERY_ADC_PIN = 5;
 // I2C bus for the NEO-M8U GPS module on the production board.
 constexpr int GPS_SDA_PIN = 8;
 constexpr int GPS_SCL_PIN = 9;
+
+// Elmetron CX-series probe on UART2 (request/response, 115200 8E1).
+// ELE_RX = ESP receives (probe TX); ELE_TX = ESP transmits (probe RX).
+constexpr int ELE_RX_PIN = 17;
+constexpr int ELE_TX_PIN = 18;
+
+// Elmetron winch H-bridge (external module on the H_BRIDGE1 connector).
+constexpr int H_EN_L_PIN  = 6;
+constexpr int H_EN_R_PIN  = 7;
+constexpr int H_PWM_PIN   = 15;
+constexpr int H_LIMIT_PIN = 12;
 
 constexpr const char* FIRMWARE_VERSION = "0.1.0-skeleton";
 
@@ -111,6 +124,15 @@ BatteryMonitor g_battery(g_clock, g_radio, BATTERY_ADC_PIN, POWER_LATCH_PIN);
 PumpControl    g_pumps;
 LevelSensor    g_levels;
 GpsLink        g_gps(g_clock);
+#endif
+#if defined(BOARD_ESP32_S3) && !defined(MOCK_PERIPHERALS)
+// Real Elmetron probe on UART2 + winch H-bridge. Omitted from the mock
+// build (no hardware wired there — the Elmetron FSM uses synthetic
+// readings + timers instead). With both present, MissionControl puts
+// the Elmetron FSM into hardware mode.
+HardwareSerial g_ele_serial(2);
+ElmetronProbe  g_ele(g_ele_serial, g_clock);
+WinchH         g_winch(H_EN_L_PIN, H_EN_R_PIN, H_PWM_PIN, H_LIMIT_PIN);
 #endif
 
 void on_frame(void* /*ctx*/, frame::Type type,
@@ -284,6 +306,12 @@ void setup() {
     g_pumps.begin();
     g_levels.begin();
     g_gps.begin(GPS_SDA_PIN, GPS_SCL_PIN);
+#  if !defined(MOCK_PERIPHERALS)
+    g_ele.begin(ELE_RX_PIN, ELE_TX_PIN);
+    g_winch.begin();
+    g_controller.set_elmetron_probe(&g_ele);
+    g_controller.set_winch(&g_winch);
+#  endif
 #  ifndef UART0_PROTOCOL_LINK
     g_controller.set_servo_bus(&g_servo_bus);
     // Battery monitor:
@@ -326,6 +354,9 @@ void loop() {
     g_battery.tick();
 #  endif
     g_gps.tick();
+#  if !defined(MOCK_PERIPHERALS)
+    g_ele.tick();
+#  endif
     if (g_gps.consume_changed()) {
         // Push the latest GPS fix into the next TLM emission. Probe
         // fields (cond / temp / ph / oxygen / measurement_valid) are

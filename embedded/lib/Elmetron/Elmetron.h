@@ -71,14 +71,23 @@ enum class ElmetronStep : uint8_t {
 };
 
 namespace elmetron_timing {
-    // Hard time bound on the HOMING step. The real winch should reach
-    // its home limit in well under this; if it doesn't, something is
-    // wrong (broken limit switch, jammed mechanism, missing H-bridge
-    // driver) and we'd rather fault out than keep driving the motor
-    // and risk snapping the cable. Tune against real hardware once
-    // the WinchH driver lands.
+    // ---- Safety caps (HARDWARE mode) ----
+    // In hardware mode each moving step advances on a real signal
+    // (limit switch / water detection / convergence); these are the
+    // backstops if that signal never comes. Sized for ELMETRON winch
+    // duty in MissionControl — rescale if the drive duty changes
+    // (slower drive ⇒ longer cap). HOMING/DESCENDING/ASCENDING faults
+    // on cap; IN_WATER just finishes with whatever the last reading is.
+    constexpr uint32_t DESCENT_MAX_MS      = 4000;   // unroll cap (mechanical)
+    constexpr uint32_t ASCENT_MAX_MS       = 5000;   // retract cap
+    constexpr uint32_t MEASURE_MAX_MS      = 90000;  // strict measure cap
+
+    // Hard time bound on the HOMING step (both modes). The real winch
+    // should reach its home limit well under this; if it doesn't,
+    // something is wrong and we'd rather fault than keep driving.
     constexpr uint32_t HOMING_MAX_MS       = 4000;
 
+    // ---- Synthetic timings (no-hardware mode, e.g. dev-kit/mock) ----
     // Time to lower the probe to the water from its docked position.
     constexpr uint32_t DESCENDING_MS       = 3000;
 
@@ -137,6 +146,20 @@ public:
     // Drive the FSM forward. Call frequently from the main loop.
     void tick();
 
+    // Hardware mode: when a real probe + winch are attached,
+    // MissionControl drives the step transitions via the notify
+    // triggers below (with the safety caps as backstops). When off
+    // (no hardware — dev-kit/mock), the FSM runs the synthetic
+    // timer-and-ramp path so the cycle is still exercisable.
+    void set_hardware_mode(bool on) { hardware_mode_ = on; }
+    bool hardware_mode() const { return hardware_mode_; }
+
+    // Notify triggers (hardware mode). Each advances the FSM only when
+    // it's in the matching step; otherwise ignored. Idempotent.
+    void at_home();           // HOMING / ASCENDING reached the home limit
+    void water_detected();    // DESCENDING — probe shows water
+    void measurement_done();  // IN_WATER — readings converged
+
     ElmetronState state() const { return state_; }
     ElmetronStep  step()  const { return step_;  }
 
@@ -158,10 +181,14 @@ private:
     uint32_t      step_entered_ms_ = 0;
     bool          state_changed_   = false;
     bool          step_changed_    = false;
+    bool          hardware_mode_   = false;
+    bool          advance_         = false;  // pending hardware trigger
 
     void enter_state(ElmetronState s);
     void enter_step(ElmetronStep s);
     uint32_t elapsed_in_step() const;
+    void tick_hardware(uint32_t elapsed);
+    void tick_synthetic(uint32_t elapsed);
 };
 
 // String helpers for protocol frame emission.

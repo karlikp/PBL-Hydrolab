@@ -14,6 +14,7 @@
 
 #include "Clock.h"
 #include "Elmetron.h"
+#include "ConvergenceDetector.h"
 
 static TestClock clk;
 
@@ -265,6 +266,93 @@ void test_reset_refused_when_docked(void) {
     TEST_ASSERT_FALSE(e.reset());
 }
 
+// ---------- hardware mode (trigger-driven + safety caps) ----------
+
+void test_hw_advances_on_triggers(void) {
+    Elmetron e(clk);
+    e.set_hardware_mode(true);
+    TEST_ASSERT_TRUE(e.request_start());
+    TEST_ASSERT_EQUAL((int)ElmetronStep::HOMING, (int)e.step());
+
+    e.at_home(); e.tick();
+    TEST_ASSERT_EQUAL((int)ElmetronStep::DESCENDING, (int)e.step());
+
+    e.water_detected(); e.tick();
+    TEST_ASSERT_EQUAL((int)ElmetronStep::IN_WATER, (int)e.step());
+
+    e.measurement_done(); e.tick();
+    TEST_ASSERT_EQUAL((int)ElmetronStep::ASCENDING, (int)e.step());
+
+    e.at_home(); e.tick();
+    TEST_ASSERT_EQUAL((int)ElmetronStep::HOME, (int)e.step());
+
+    clk.advance(elmetron_timing::HOME_MS); e.tick();
+    TEST_ASSERT_EQUAL((int)ElmetronState::DOCKED, (int)e.state());
+}
+
+void test_hw_trigger_ignored_in_wrong_step(void) {
+    Elmetron e(clk);
+    e.set_hardware_mode(true);
+    e.request_start();           // HOMING
+    e.water_detected();          // not valid in HOMING — must be ignored
+    e.tick();
+    TEST_ASSERT_EQUAL((int)ElmetronStep::HOMING, (int)e.step());
+}
+
+void test_hw_descent_timeout_faults(void) {
+    Elmetron e(clk);
+    e.set_hardware_mode(true);
+    e.request_start();
+    e.at_home(); e.tick();       // → DESCENDING
+    TEST_ASSERT_EQUAL((int)ElmetronStep::DESCENDING, (int)e.step());
+    // No water before the cap → FAULT.
+    clk.advance(elmetron_timing::DESCENT_MAX_MS); e.tick();
+    TEST_ASSERT_EQUAL((int)ElmetronState::FAULT, (int)e.state());
+}
+
+void test_hw_measure_timeout_finishes_not_faults(void) {
+    Elmetron e(clk);
+    e.set_hardware_mode(true);
+    e.request_start();
+    e.at_home(); e.tick();          // DESCENDING
+    e.water_detected(); e.tick();   // IN_WATER
+    // Never converges → finishes on the strict cap (NOT a fault).
+    clk.advance(elmetron_timing::MEASURE_MAX_MS); e.tick();
+    TEST_ASSERT_EQUAL((int)ElmetronStep::ASCENDING, (int)e.step());
+    TEST_ASSERT_EQUAL((int)ElmetronState::MEASURING, (int)e.state());
+}
+
+// ---------- convergence detector ----------
+
+void test_convergence_needs_full_window(void) {
+    ConvergenceDetector cd;
+    cd.reset();
+    // Flat values but only a few seconds of data → not yet converged.
+    for (uint32_t t = 0; t <= 3000; t += 500) cd.add(t, 1.000f);
+    TEST_ASSERT_FALSE(cd.converged(3000));
+}
+
+void test_convergence_flat_over_window(void) {
+    ConvergenceDetector cd;
+    cd.reset();
+    // A full window of flat readings → converged.
+    for (uint32_t t = 0; t <= ConvergenceDetector::WINDOW_MS + 500; t += 500)
+        cd.add(t, 1.000f);
+    TEST_ASSERT_TRUE(cd.converged(ConvergenceDetector::WINDOW_MS + 500));
+}
+
+void test_convergence_drifting_not_converged(void) {
+    ConvergenceDetector cd;
+    cd.reset();
+    // Ramp well beyond tolerance across the window → not converged.
+    float v = 1.0f;
+    for (uint32_t t = 0; t <= ConvergenceDetector::WINDOW_MS + 500; t += 500) {
+        cd.add(t, v);
+        v += 0.05f;  // 5% per sample — clearly drifting
+    }
+    TEST_ASSERT_FALSE(cd.converged(ConvergenceDetector::WINDOW_MS + 500));
+}
+
 // ---------- string helpers ----------
 
 void test_state_names(void) {
@@ -309,6 +397,15 @@ void setup() {
     RUN_TEST(test_reset_from_fault);
     RUN_TEST(test_reset_refused_while_measuring);
     RUN_TEST(test_reset_refused_when_docked);
+
+    RUN_TEST(test_hw_advances_on_triggers);
+    RUN_TEST(test_hw_trigger_ignored_in_wrong_step);
+    RUN_TEST(test_hw_descent_timeout_faults);
+    RUN_TEST(test_hw_measure_timeout_finishes_not_faults);
+
+    RUN_TEST(test_convergence_needs_full_window);
+    RUN_TEST(test_convergence_flat_over_window);
+    RUN_TEST(test_convergence_drifting_not_converged);
 
     RUN_TEST(test_state_names);
     RUN_TEST(test_step_names);

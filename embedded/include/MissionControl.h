@@ -21,6 +21,7 @@
 
 #include "Sampler.h"
 #include "Elmetron.h"
+#include "ConvergenceDetector.h"
 
 class Clock;
 class RadioLink;
@@ -30,6 +31,8 @@ class PumpControl;
 class LevelSensor;
 class GpsLink;
 class Telemetry;
+class ElmetronProbe;
+class WinchH;
 
 enum class SystemMode : uint8_t {
     IDLE,
@@ -114,6 +117,19 @@ public:
     // data (probe fields stay zero, measurement_valid stays 0).
     void set_telemetry(Telemetry* t) { telemetry_ = t; }
 
+    // Optional: attach the real Elmetron probe (CX-series over UART2).
+    // When present, CMD,ELE reports live probe readings; the FSM
+    // integration (conductance-triggered descent, real readings to
+    // telemetry) builds on this. Absent on hardware-less builds, where
+    // the Elmetron FSM falls back to synthetic readings.
+    void set_elmetron_probe(ElmetronProbe* p) { elmetron_probe_ = p; update_elmetron_mode(); }
+
+    // Optional: attach the Elmetron winch (H-bridge). With both a probe
+    // and a winch attached, the Elmetron FSM switches to hardware mode:
+    // transitions are driven by the limit switch / water detection /
+    // convergence rather than synthetic timers.
+    void set_winch(WinchH* w) { winch_ = w; update_elmetron_mode(); }
+
 private:
     // Per-tank geo-tag captured at the moment the Sampler transitions
     // to FULL. `valid` stays false until the tank has been collected
@@ -146,6 +162,9 @@ private:
     GpsLink*        gps_ = nullptr;
     Elmetron*       elmetron_ = nullptr;
     Telemetry*      telemetry_ = nullptr;
+    ElmetronProbe*  elmetron_probe_ = nullptr;
+    WinchH*         winch_ = nullptr;
+    ConvergenceDetector conv_;  // conductivity stability during IN_WATER
 
     // Command handlers
     void cmd_start_tank(uint8_t idx, const char* verb);
@@ -170,6 +189,7 @@ private:
     void cmd_collections(const char* verb);
     void cmd_cfg(const char* verb, const char* args, size_t args_len);
     void cmd_cfg_get(const char* verb);
+    void cmd_ele(const char* verb);
 
     void set_mode(SystemMode m);
     bool any_tank_sampling() const;
@@ -207,8 +227,19 @@ private:
     // Drive the tank's pump on PUMPING entry, off on any other step.
     void drive_pump_for_step(const Sampler& tank);
 
-    // Drive the Elmetron winch servo on DESCENDING/ASCENDING entries.
-    void drive_elmetron_servo_for_step();
+    // Drive the Elmetron winch motor for the current step (UP for
+    // HOMING/ASCENDING, DOWN for DESCENDING, STOP otherwise). No-op
+    // without a winch attached.
+    void drive_elmetron_winch_for_step();
+
+    // Hardware-mode service: read the winch limit switch + probe each
+    // tick and fire the Elmetron FSM's notify triggers (at_home /
+    // water_detected / measurement_done). No-op outside hardware mode.
+    void service_elmetron_hardware();
+
+    // Recompute whether the Elmetron FSM should run in hardware mode
+    // (both probe + winch attached). Called from the setters.
+    void update_elmetron_mode();
 
     // Push the current Elmetron reading (synthetic ramp during settle,
     // steady-state thereafter) into the telemetry pipeline. Called

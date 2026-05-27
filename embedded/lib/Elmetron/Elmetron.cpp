@@ -25,10 +25,61 @@ bool Elmetron::reset() {
     return true;
 }
 
+void Elmetron::at_home() {
+    if (step_ == ElmetronStep::HOMING || step_ == ElmetronStep::ASCENDING)
+        advance_ = true;
+}
+
+void Elmetron::water_detected() {
+    if (step_ == ElmetronStep::DESCENDING) advance_ = true;
+}
+
+void Elmetron::measurement_done() {
+    if (step_ == ElmetronStep::IN_WATER) advance_ = true;
+}
+
 void Elmetron::tick() {
     if (state_ != ElmetronState::MEASURING) return;
-
     const uint32_t elapsed = elapsed_in_step();
+    if (hardware_mode_) tick_hardware(elapsed);
+    else                tick_synthetic(elapsed);
+}
+
+// Hardware mode: each moving step advances on its notify trigger, or
+// faults/finishes on the safety cap. HOMING/DESCENDING/ASCENDING fault
+// on cap (something's wrong — broken switch, jam, wrong polarity);
+// IN_WATER just finishes with whatever the last reading was.
+void Elmetron::tick_hardware(uint32_t elapsed) {
+    switch (step_) {
+        case ElmetronStep::HOMING:
+            if (advance_)                                  enter_step(ElmetronStep::DESCENDING);
+            else if (elapsed >= elmetron_timing::HOMING_MAX_MS) { enter_state(ElmetronState::FAULT); enter_step(ElmetronStep::NONE); }
+            break;
+        case ElmetronStep::DESCENDING:
+            if (advance_)                                  enter_step(ElmetronStep::IN_WATER);
+            else if (elapsed >= elmetron_timing::DESCENT_MAX_MS) { enter_state(ElmetronState::FAULT); enter_step(ElmetronStep::NONE); }
+            break;
+        case ElmetronStep::IN_WATER:
+            if (advance_ || elapsed >= elmetron_timing::MEASURE_MAX_MS)
+                enter_step(ElmetronStep::ASCENDING);
+            break;
+        case ElmetronStep::ASCENDING:
+            if (advance_)                                  enter_step(ElmetronStep::HOME);
+            else if (elapsed >= elmetron_timing::ASCENT_MAX_MS) { enter_state(ElmetronState::FAULT); enter_step(ElmetronStep::NONE); }
+            break;
+        case ElmetronStep::HOME:
+            if (elapsed >= elmetron_timing::HOME_MS) {
+                enter_state(ElmetronState::DOCKED);
+                enter_step(ElmetronStep::NONE);
+            }
+            break;
+        case ElmetronStep::NONE:
+            enter_state(ElmetronState::FAULT);
+            break;
+    }
+}
+
+void Elmetron::tick_synthetic(uint32_t elapsed) {
     switch (step_) {
         case ElmetronStep::HOMING:
             // Placeholder behaviour: dwell up to HOMING_MAX_MS then
@@ -128,6 +179,7 @@ void Elmetron::enter_step(ElmetronStep s) {
     step_ = s;
     step_entered_ms_ = clock_.now_ms();
     step_changed_ = true;
+    advance_ = false;  // a trigger only counts for the step it arrives in
 }
 
 uint32_t Elmetron::elapsed_in_step() const {
