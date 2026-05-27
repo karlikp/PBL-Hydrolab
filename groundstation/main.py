@@ -33,10 +33,13 @@ SERIAL_BAUD = int(os.environ.get("SERIAL_BAUD", "115200"))
 STATUS_POLL_INTERVAL_S = 30.0
 
 # How often to round-robin through CMD,LEVEL,1/2/3 so the UI shows a
-# live wet/dry indicator per tank. One tank per tick: with 0.7 s
-# between firings each tank refreshes every ~2.1 s and the radio sees
-# ~1.4 frames/s of LEVEL CMD/EVT chatter on top of TLM.
-LEVEL_POLL_INTERVAL_S = 0.7
+# live wet/dry indicator per tank. One tank per tick. The level pill
+# is valuable debugging feedback so we keep it on the radio, but the
+# uplink chatter competes with operator commands on a duty-cycle-
+# limited link — so the default is throttled (each tank refreshes
+# every ~4.5 s at 1.5 s/tick). Tune with the LEVEL_POLL_INTERVAL_S
+# env var; set it to 0 to disable the poller entirely.
+LEVEL_POLL_INTERVAL_S = float(os.environ.get("LEVEL_POLL_INTERVAL_S", "1.5"))
 
 
 @asynccontextmanager
@@ -76,13 +79,16 @@ async def lifespan(app: FastAPI):
             tank_id = tank_id % 3 + 1
             await asyncio.sleep(LEVEL_POLL_INTERVAL_S)
 
-    level_task = asyncio.create_task(level_poller())
+    # LEVEL_POLL_INTERVAL_S <= 0 disables the poller (radio congestion).
+    level_task = (asyncio.create_task(level_poller())
+                  if LEVEL_POLL_INTERVAL_S > 0 else None)
 
     try:
         yield
     finally:
         poller_task.cancel()
-        level_task.cancel()
+        if level_task:
+            level_task.cancel()
         radio.stop()
 
 

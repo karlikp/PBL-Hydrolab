@@ -131,8 +131,8 @@ async def stream_live(request: Request):
 # ---------------- command send ----------------
 
 @router.post("/cmd/{verb}")
-def send_cmd(verb: str, request: Request, args: Optional[str] = None):
-    """Write a CMD frame to the drone.
+async def send_cmd(verb: str, request: Request, args: Optional[str] = None):
+    """Write a CMD frame to the drone and wait for its ACK/NACK.
 
     `verb` is the command name (case-sensitive, matches what the
     firmware expects — START_C1, E_STOP, STATUS, ...).
@@ -140,12 +140,20 @@ def send_cmd(verb: str, request: Request, args: Optional[str] = None):
     Optional `args` query string is comma-joined onto the payload, so
     `POST /api/cmd/SERVO_MOVE?args=1,200` sends `CMD,SERVO_MOVE,1,200`.
 
-    Response is the build-and-write result; the actual ACK/NACK from
-    the drone arrives back over /api/stream/live.
+    The frame is resent on timeout (radio frames get dropped), so the
+    response reflects the actual outcome rather than just "written":
+      {"result": "confirmed"}                 — drone ACK'd
+      {"result": "rejected", "reason": "..."} — drone NACK'd
+      {"result": "no_response", "attempts": N}— no ACK after retries
+      {"result": "send_failed"}               — serial write failed
+
+    The per-subsystem STATE events on /api/stream/live remain the
+    source of truth for the UI; this return is advisory (see
+    send_cmd_confirmed's at-least-once note).
     """
     radio = _radio(request)
     arg_list = [a for a in args.split(",")] if args else None
-    ok = radio.send_cmd(verb, arg_list)
-    if not ok:
+    outcome = await radio.send_cmd_confirmed(verb, arg_list)
+    if outcome.get("result") == "send_failed":
         raise HTTPException(status_code=503, detail="serial write failed")
-    return {"sent": True, "verb": verb, "args": arg_list or []}
+    return {"verb": verb, "args": arg_list or [], **outcome}

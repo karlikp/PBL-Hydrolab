@@ -133,6 +133,14 @@ class RadioService:
         self.subscribers_lock = threading.Lock()
         self.main_loop: Optional[asyncio.AbstractEventLoop] = None
 
+        # Pending command confirmations: verb -> list of asyncio.Future.
+        # send_cmd_confirmed registers a future before writing a CMD;
+        # the radio thread resolves it when the matching ACK/NACK
+        # arrives. Lets the HTTP command endpoint wait-and-retry like
+        # tools/send_cmd.py does, instead of fire-and-forget.
+        self.ack_waiters: dict[str, list] = {}
+        self.ack_waiters_lock = threading.Lock()
+
     # -------- lifecycle --------
 
     def start(self, main_loop: asyncio.AbstractEventLoop):
@@ -179,6 +187,63 @@ class RadioService:
             except Exception as e:
                 print(f"[Radio] send_cmd failed: {e}")
                 return False
+
+    # -------- command confirmation (wait for ACK/NACK, retry) --------
+
+    def register_ack_waiter(self, verb: str) -> asyncio.Future:
+        """Register a future that resolves when ACK/NACK,<verb> arrives.
+        Must be called from the event loop (async context)."""
+        fut = asyncio.get_running_loop().create_future()
+        with self.ack_waiters_lock:
+            self.ack_waiters.setdefault(verb, []).append(fut)
+        return fut
+
+    def cancel_ack_waiter(self, verb: str, fut: asyncio.Future):
+        with self.ack_waiters_lock:
+            lst = self.ack_waiters.get(verb)
+            if lst and fut in lst:
+                lst.remove(fut)
+                if not lst:
+                    self.ack_waiters.pop(verb, None)
+
+    def _resolve_ack(self, verb: str, result: dict):
+        """Resolve pending waiters for `verb`. Called from radio thread."""
+        loop = self.main_loop
+        if not loop:
+            return
+        with self.ack_waiters_lock:
+            waiters = self.ack_waiters.pop(verb, [])
+        for fut in waiters:
+            loop.call_soon_threadsafe(
+                lambda f=fut: (not f.done()) and f.set_result(result))
+
+    async def send_cmd_confirmed(self, verb: str, args: Optional[list[str]] = None,
+                                 timeout: float = 0.7, retries: int = 3) -> dict:
+        """Send a CMD and wait for its ACK/NACK, resending on timeout.
+
+        Returns one of:
+          {"result": "confirmed"}
+          {"result": "rejected", "reason": "..."}
+          {"result": "no_response", "attempts": N}
+          {"result": "send_failed"}
+
+        Note: retry is at-least-once. If the uplink CMD arrived but its
+        ACK was lost on the downlink, the resend can draw a NACK
+        (e.g. "busy") even though the first attempt actually took. The
+        per-subsystem STATE events are the source of truth for the UI;
+        this return is advisory.
+        """
+        for attempt in range(1, retries + 1):
+            fut = self.register_ack_waiter(verb)
+            if not self.send_cmd(verb, args):
+                self.cancel_ack_waiter(verb, fut)
+                return {"result": "send_failed"}
+            try:
+                return await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                self.cancel_ack_waiter(verb, fut)
+                continue
+        return {"result": "no_response", "attempts": retries}
 
     # -------- SSE pub/sub --------
 
@@ -339,6 +404,14 @@ class RadioService:
             })
         except Exception as e:
             print(f"[Radio] insert_event failed: {e}")
+
+        # Resolve any command-confirmation waiter for this ACK/NACK.
+        # ACK details is the bare verb; NACK details is "VERB:reason".
+        if source == "SYS" and kind == "ACK":
+            self._resolve_ack(details, {"result": "confirmed"})
+        elif source == "SYS" and kind == "NACK":
+            v, _, reason = details.partition(":")
+            self._resolve_ack(v, {"result": "rejected", "reason": reason})
 
         # Update state based on what kind of EVT this is.
         self._update_state_from_evt(source, kind, details)

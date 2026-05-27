@@ -47,6 +47,11 @@
             padding: 9px 20px; font-weight: 800; font-size: 0.95em; cursor: pointer;
             box-shadow: 0 2px 4px rgba(220,53,69,0.3); white-space: nowrap; }
         .btn-estop:hover { background: #b02a37; }
+        .cmd-status { padding: 5px 10px; border-radius: 5px; font-size: 0.82em;
+            font-weight: 600; white-space: nowrap; background: #f1f3f5; color: #555; }
+        .cmd-status.cmd-pending { background: #fff3cd; color: #664d03; }
+        .cmd-status.cmd-ok      { background: #d1e7dd; color: #0a3622; }
+        .cmd-status.cmd-bad     { background: #f8d7da; color: #842029; }
 
         /* ---------- operator column ---------- */
         .op-card { background: white; border-radius: 8px; padding: 10px 12px;
@@ -159,6 +164,7 @@
             <span id="op-fw" class="indicator">FW: --</span>
             <span id="op-gps" class="indicator">GPS: --</span>
         </div>
+        <span id="cmd-status" class="cmd-status">ready</span>
         <button id="btn-estop" class="btn-estop" onclick="sendCmd('E_STOP')">E-STOP</button>
     </header>
 
@@ -423,17 +429,46 @@
             while (log.children.length > 200) log.removeChild(log.lastChild);
         }
 
-        // ---- CMD send ----
+        // ---- CMD send (waits for ACK/NACK, server retries on timeout) ----
+        function setCmdStatus(verb, state, detail) {
+            const el = document.getElementById("cmd-status");
+            if (!el) return;
+            let text, cls;
+            switch (state) {
+                case "pending":     text = `${verb} — sending…`;                  cls = "cmd-pending"; break;
+                case "confirmed":   text = `${verb} — OK`;                         cls = "cmd-ok";      break;
+                case "rejected":    text = `${verb} — rejected: ${detail || "?"}`; cls = "cmd-bad";     break;
+                case "no_response": text = `${verb} — no response (${detail})`;    cls = "cmd-bad";     break;
+                default:            text = `${verb} — failed: ${detail || "?"}`;   cls = "cmd-bad";     break;
+            }
+            el.textContent = text;
+            el.className = "cmd-status " + cls;
+        }
+
         async function sendCmd(verb, args) {
             const url = "/api/cmd/" + encodeURIComponent(verb)
                       + (args && args.length ? "?args=" + encodeURIComponent(args.join(",")) : "");
             appendLog(`→ CMD,${verb}${args ? "," + args.join(",") : ""}`, "log-evt");
+            setCmdStatus(verb, "pending");
             try {
                 const res = await fetch(url, { method: "POST" });
+                const data = await res.json().catch(() => ({}));
                 if (!res.ok) {
+                    setCmdStatus(verb, "failed", `HTTP ${res.status}`);
                     appendLog(`CMD ${verb} HTTP ${res.status}`, "log-error");
+                    return;
+                }
+                if (data.result === "confirmed") {
+                    setCmdStatus(verb, "confirmed");
+                } else if (data.result === "rejected") {
+                    setCmdStatus(verb, "rejected", data.reason);
+                } else if (data.result === "no_response") {
+                    setCmdStatus(verb, "no_response", `${data.attempts} tries`);
+                } else {
+                    setCmdStatus(verb, "failed", data.result);
                 }
             } catch (e) {
+                setCmdStatus(verb, "failed", String(e));
                 appendLog(`CMD ${verb} failed: ${e}`, "log-error");
             }
         }
