@@ -84,10 +84,18 @@ Useful sister URLs:
 
 ## Configuration
 
-| Env var       | Default       | Notes                                                            |
-|---------------|---------------|------------------------------------------------------------------|
-| `SERIAL_PORT` | `/dev/ttyUSB0`| Path or `/dev/serial/by-id/...` symlink.                         |
-| `SERIAL_BAUD` | `115200`      | `115200` for CP210x bench builds; `57600` for the RFD868 radio. |
+| Env var                 | Default        | Notes                                                            |
+|-------------------------|----------------|------------------------------------------------------------------|
+| `SERIAL_PORT`           | `/dev/ttyUSB0` | Path, `/dev/serial/by-id/...`, or `COMx` on Windows.            |
+| `SERIAL_BAUD`           | `115200`       | `115200` for CP210x bench builds; `57600` for the RFD868 radio. |
+| `LEVEL_POLL_INTERVAL_S` | `1.5`          | Seconds between per-tank `CMD,LEVEL` polls (round-robin, so each tank refreshes every ~3× this). Lower = snappier wet/dry pills but more radio chatter. Set to `0` to disable the poller (e.g. if the radio link is congested). |
+
+Commands sent from the dashboard (or `POST /api/cmd/{verb}`) are
+**confirmed and retried**: the backend waits for the matching
+`ACK`/`NACK` and resends on timeout (default 0.7 s × 3), since radio
+frames get dropped. The command-status pill in the top bar shows
+*sending… / OK / rejected / no response*. The per-tank STATE badges
+remain the source of truth for what the drone actually did.
 
 The SQLite file `drone_data.db` is created in the working directory on
 first run. Schema migrations are idempotent (`CREATE TABLE IF NOT
