@@ -34,20 +34,42 @@ with no peripherals connected, plus the ground station on your laptop.
 Lets you exercise the whole operator UI before any of the physical drone
 hardware is in front of you.
 
+> **Windows users:** commands below are given for both Linux/macOS and
+> Windows. If you drive PlatformIO through the **VS Code extension**
+> rather than the CLI, see
+> [`embedded/README.md` → "VS Code extension"](embedded/README.md#vs-code-extension-no-cli)
+> — you click toolbar buttons instead of typing `pio`.
+
 **1.** Flash the firmware to any spare ESP32-S3 (CP210x USB adapter
 plugged into UART0):
 
 ```bash
+# Linux / macOS
 cd embedded
 ~/.platformio/penv/bin/pio run -e esp32s3wroom1-mock -t upload
+```
+
+```powershell
+# Windows (PowerShell) — pio is on PATH inside the PlatformIO Core CLI terminal
+cd embedded
+pio run -e esp32s3wroom1-mock -t upload
 ```
 
 **2.** Run the ground station against the same USB port:
 
 ```bash
+# Linux / macOS
 cd ../groundstation
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/uvicorn main:app
+```
+
+```powershell
+# Windows (PowerShell)
+cd ..\groundstation
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\uvicorn main:app
 ```
 
 **3.** Open <http://127.0.0.1:8000/static/> in a browser. Within a few

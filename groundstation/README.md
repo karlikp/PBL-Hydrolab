@@ -13,19 +13,55 @@ right for collected measurements.
 ## Run
 
 Requirements: Python 3.10+ and the drone's serial adapter visible to
-the OS (CP210x for bench, FTDI for the radio).
+the OS. On Linux that's `/dev/ttyUSB0` (CP210x bench) or `/dev/ttyUSB1`
+(FTDI radio); on Windows it's a `COMx` port — find it in **Device
+Manager → Ports (COM & LPT)**.
+
+**Linux / macOS:**
 
 ```bash
 cd groundstation
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# Default: CP210x bench (deploy / mock firmware on UART0)
+# Default: CP210x bench (deploy / mock firmware on UART0), /dev/ttyUSB0 @ 115200
 .venv/bin/uvicorn main:app
 
 # Real radio link
 SERIAL_PORT=/dev/ttyUSB1 SERIAL_BAUD=57600 .venv/bin/uvicorn main:app
 ```
+
+**Windows (PowerShell):**
+
+```powershell
+cd groundstation
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+
+# Default: CP210x bench. Set the port to your CP210x COM number first.
+$env:SERIAL_PORT="COM5"; .venv\Scripts\uvicorn main:app
+
+# Real radio link
+$env:SERIAL_PORT="COM6"; $env:SERIAL_BAUD="57600"; .venv\Scripts\uvicorn main:app
+```
+
+**Windows (cmd.exe):**
+
+```cmd
+cd groundstation
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+
+set SERIAL_PORT=COM5
+set SERIAL_BAUD=57600
+.venv\Scripts\uvicorn main:app
+```
+
+> On PowerShell, `$env:VAR="value"` sets the variable for the rest of
+> the session — chaining with `;` keeps it to one line. On `cmd.exe`,
+> `set VAR=value` persists until the window closes, so run the `set`
+> lines once then start uvicorn. Unlike Linux, you can't inline
+> `VAR=value command` on a single Windows line.
 
 Open <http://127.0.0.1:8000/static/> in a browser.
 
@@ -147,6 +183,25 @@ curl -X POST 'http://127.0.0.1:8000/api/cmd/SERVO_MOVE?args=2,500'
 # Subscribe to the live stream (Ctrl+C to exit)
 curl -N http://127.0.0.1:8000/api/stream/live
 ```
+
+> **Windows / PowerShell gotcha:** in PowerShell, `curl` is an alias
+> for `Invoke-WebRequest`, which does **not** accept `-X`/`-N` and will
+> error. Use `curl.exe` explicitly (the `.exe` bypasses the alias —
+> works on Windows 10+):
+>
+> ```powershell
+> curl.exe -X POST http://127.0.0.1:8000/api/cmd/START_C1
+> curl.exe -X POST "http://127.0.0.1:8000/api/cmd/LEVEL?args=2"
+> ```
+>
+> Or stay native with `Invoke-RestMethod`:
+>
+> ```powershell
+> Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/cmd/START_C1
+> ```
+>
+> Easiest of all: the dashboard buttons and <http://127.0.0.1:8000/docs>
+> (the "Try it out" panel) send these for you — no shell quoting at all.
 
 The full CMD verb list lives in [`docs/protocol.md`](../docs/protocol.md).
 

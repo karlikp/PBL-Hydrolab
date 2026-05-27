@@ -6,10 +6,54 @@ the SC-09 servo bus are all live on hardware. The Elmetron probe and
 its H-bridge winch are still stubs (driver pending hardware
 integration — see [Mock vs real](#mock-vs-real)).
 
+## Platform conventions
+
+Commands are shown for **Linux/macOS** and **Windows (PowerShell)**.
+A few things differ between them:
+
+| Thing                | Linux / macOS                  | Windows                                  |
+|----------------------|--------------------------------|------------------------------------------|
+| Serial port name     | `/dev/ttyUSB0`, `/dev/ttyUSB1` | `COM3`, `COM5`, … (check Device Manager) |
+| PlatformIO CLI       | `~/.platformio/penv/bin/pio`   | `pio` (inside the PlatformIO Core CLI terminal) or the VS Code toolbar |
+| Python interpreter   | `python3`                      | `python`                                 |
+| venv executables     | `.venv/bin/<tool>`             | `.venv\Scripts\<tool>`                   |
+
+To find the COM port on Windows: open **Device Manager → Ports (COM &
+LPT)**. The CP210x adapter shows as "Silicon Labs CP210x"; the radio's
+FTDI shows as "USB Serial Port".
+
+## VS Code extension (no CLI)
+
+If you use the **PlatformIO VS Code extension** instead of the command
+line (common on Windows):
+
+1. Open the **`embedded/`** folder in VS Code — PlatformIO detects
+   `platformio.ini` and loads the project.
+2. The default build target is `esp32s3wroom1` (the production deploy
+   env), set via `default_envs` in `platformio.ini`. To build a
+   different env, click the environment name in the **status bar**
+   (bottom) and pick another, or use the project tasks under the
+   PlatformIO sidebar (the alien-head icon) → **Project Tasks → \<env\>**.
+3. Build / Upload / Monitor are the **✓ / → / 🔌 icons** in the blue
+   status bar at the bottom, or the matching entries under each env's
+   Project Tasks.
+4. For the `curl` / `pio` / `send_cmd.py` commands in this README,
+   open a terminal via **PlatformIO sidebar → Quick Access → Miscellaneous
+   → PlatformIO Core CLI** — `pio` is on `PATH` there.
+
+> The deploy env (`esp32s3wroom1`) builds with battery protection
+> **compiled out** (`-DDISABLE_BATTERY_MONITOR` in `platformio.ini`)
+> while the R18/R19 divider rework is pending — so it won't power the
+> board off on the saturated ADC. If your board is still shutting
+> itself off after upload, confirm you actually flashed `esp32s3wroom1`
+> and not a stale build, and that the flag is still present in
+> `platformio.ini`.
+
 ## Build envs at a glance
 
 Pick the env that matches what you have in front of you. All envs are
-declared in [`platformio.ini`](platformio.ini).
+declared in [`platformio.ini`](platformio.ini). The default
+(`pio run` / VS Code Build with no env selected) is `esp32s3wroom1`.
 
 | Env                       | Protocol link        | When to use                                                                                        |
 |---------------------------|----------------------|----------------------------------------------------------------------------------------------------|
@@ -22,21 +66,26 @@ declared in [`platformio.ini`](platformio.ini).
 
 ## Flash / monitor
 
-If `pio` on your `$PATH` resolves to an old 4.x install, use the
-explicit modern path: `~/.platformio/penv/bin/pio`.
+On Linux/macOS, if `pio` on your `$PATH` resolves to an old 4.x
+install, use the explicit modern path: `~/.platformio/penv/bin/pio`.
+On Windows, run these inside the **PlatformIO Core CLI** terminal
+(where `pio` is on `PATH`) or use the toolbar buttons — see
+[VS Code extension](#vs-code-extension-no-cli).
 
 ```bash
-# Build only (sanity check)
-pio run -e esp32s3wroom1
+# Linux / macOS
+pio run -e esp32s3wroom1                          # build only
+pio run -e esp32s3wroom1 -t upload                # build + upload
+pio device monitor -p /dev/ttyUSB0 -b 115200      # CP210x bench monitor
+pio device monitor -p /dev/ttyUSB1 -b 57600       # radio (FTDI) listen
+```
 
-# Build + upload
-pio run -e esp32s3wroom1 -t upload
-
-# Serial monitor (CP210x adapter, 115200 baud)
-pio device monitor -p /dev/ttyUSB0 -b 115200
-
-# Radio listen (FTDI on the V5 radio, 57600 baud)
-pio device monitor -p /dev/ttyUSB1 -b 57600
+```powershell
+# Windows (PowerShell) — swap /dev/ttyUSBx for your COM port
+pio run -e esp32s3wroom1                          # build only
+pio run -e esp32s3wroom1 -t upload                # build + upload
+pio device monitor -p COM5 -b 115200              # CP210x bench monitor
+pio device monitor -p COM6 -b 57600               # radio (FTDI) listen
 ```
 
 The deploy env (`esp32s3wroom1`) pins the upload port to the CP210x
@@ -62,17 +111,27 @@ You don't need radio, pumps, sensors, GPS, or batteries for this.
 Just a spare ESP32-S3 board on your laptop USB.
 
 ```bash
+# Linux / macOS
 # 1. Flash the mock build
 pio run -e esp32s3wroom1-mock -t upload
-
-# 2. Watch the protocol stream live
+# 2. Watch the protocol stream live (EVT,SYS,BOOT once, then TLM @ 2 Hz)
 pio device monitor -p /dev/ttyUSB0 -b 115200
-# You should see EVT,SYS,BOOT,... once, then TLM frames every 500 ms.
-
 # 3. From another terminal, fire commands
 python3 tools/send_cmd.py -p /dev/ttyUSB0 -b 115200 STATUS
 python3 tools/send_cmd.py -p /dev/ttyUSB0 -b 115200 --watch 12 START_C1
 python3 tools/send_cmd.py -p /dev/ttyUSB0 -b 115200 --watch 25 START_ELMETRON
+```
+
+```powershell
+# Windows (PowerShell) — swap COM5 for your CP210x port
+# 1. Flash the mock build
+pio run -e esp32s3wroom1-mock -t upload
+# 2. Watch the protocol stream live (EVT,SYS,BOOT once, then TLM @ 2 Hz)
+pio device monitor -p COM5 -b 115200
+# 3. From another terminal, fire commands
+python tools\send_cmd.py -p COM5 -b 115200 STATUS
+python tools\send_cmd.py -p COM5 -b 115200 --watch 12 START_C1
+python tools\send_cmd.py -p COM5 -b 115200 --watch 25 START_ELMETRON
 ```
 
 A C1 sample cycle runs in ~7.5 s on mock timings, an Elmetron
@@ -87,6 +146,7 @@ real ESP32. There's no host-side runner; the tests use the same
 toolchain and headers as the firmware.
 
 ```bash
+# Same on Linux/macOS and Windows (the env name carries the board)
 pio test -e esp32doit-devkit-v1                       # run all
 pio test -e esp32doit-devkit-v1 -f test_frame_codec   # one suite
 pio test -e esp32doit-devkit-v1 -f test_sampler
