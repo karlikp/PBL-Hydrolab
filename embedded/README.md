@@ -263,9 +263,17 @@ GCS re-pushes it on every `EVT,SYS,BOOT`. Defaults match the historical
 1:1 wiring (tank N → channel/servo N), so an un-provisioned board
 behaves exactly as before.
 
-- `CMD,CFG,to=<sec>,C1=<en>:<ch>:<servo>,C2=...,C3=...` sets it (one
-  atomic frame; NACK'd while busy or on invalid/duplicate mapping).
-- `CMD,CFG_GET` (and `CMD,STATUS`) reply `EVT,SYS,CFG,...` for readback.
+- `CMD,CFG,to=<sec>,Cx=<en>:<ch>:<servo>:<home>:<unrolled>,...` sets the
+  tank mapping — including each winch's SC-09 home/unrolled calibration
+  positions (one atomic frame; NACK'd while busy or on invalid/duplicate
+  mapping).
+- `CMD,CFG_ELE,...` sets the Elmetron tuning — water-detect threshold,
+  winch duty, the descent/ascent/homing/measure safety caps (descent is
+  firmware-ceilinged so the mechanical safety can't be disabled), the
+  convergence window/tolerance, and the winch direction/limit polarity
+  flips for bring-up.
+- `CMD,CFG_GET` / `CMD,CFG_ELE_GET` (and `CMD,STATUS`) reply
+  `EVT,SYS,CFG,...` / `EVT,SYS,CFG_ELE,...` for readback.
 - A disabled tank NACKs `START_Cx` with `disabled`.
 
 Lives in `MissionControl` (`SystemConfig`), so it works identically on

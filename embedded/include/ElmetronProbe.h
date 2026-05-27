@@ -64,8 +64,13 @@ public:
     // One-shot: true if a fresh frame arrived since the last call.
     bool consume_changed();
 
+    // Conductivity (mS/cm) above which water is considered detected —
+    // the descent trigger. Provisioned from the GCS; defaults to the
+    // legacy value.
+    void set_water_threshold_ms(float t) { water_threshold_ms_ = t; }
+
     static constexpr uint32_t BAUD              = 115200;
-    static constexpr float    WATER_THRESHOLD_MS = 0.7f;   // mS/cm
+    static constexpr float    WATER_THRESHOLD_MS = 0.7f;   // mS/cm (default)
     static constexpr uint32_t READ_DELAY_MS     = 500;     // wait for reply
 
 private:
@@ -80,6 +85,7 @@ private:
     Reading         last_;
     bool            changed_      = false;
     bool            present_      = false;
+    float           water_threshold_ms_ = WATER_THRESHOLD_MS;
 
     void send_query();
     void process_incoming();

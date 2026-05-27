@@ -20,10 +20,16 @@
 class ConvergenceDetector {
 public:
     // Rough defaults — tune on real hardware once probe noise is known.
+    // Runtime-overridable via set_params (provisioned from the GCS).
     static constexpr uint32_t WINDOW_MS = 10000;  // 10 s flat ⇒ converged
     static constexpr float    TOLERANCE = 0.05f;  // 5% spread (rough)
     static constexpr size_t   CAP       = 48;     // ~2 Hz × 24 s headroom
     static constexpr size_t   MIN_SAMPLES = 4;
+
+    void set_params(uint32_t window_ms, float tolerance) {
+        window_ms_ = window_ms;
+        tolerance_ = tolerance;
+    }
 
     void reset() { count_ = 0; head_ = 0; }
 
@@ -41,7 +47,7 @@ public:
         size_t n = 0;
         uint32_t oldest = now_ms;
         for (size_t i = 0; i < count_; ++i) {
-            if (now_ms - ts_[i] > WINDOW_MS) continue;  // outside window
+            if (now_ms - ts_[i] > window_ms_) continue;  // outside window
             const float v = val_[i];
             if (n == 0) { mn = v; mx = v; }
             else { if (v < mn) mn = v; if (v > mx) mx = v; }
@@ -51,12 +57,12 @@ public:
         }
         if (n < MIN_SAMPLES) return false;
         // Require the window to actually be full (oldest in-window sample
-        // ~WINDOW_MS old) so we don't declare convergence on a brief
+        // ~window_ms_ old) so we don't declare convergence on a brief
         // flat patch right after entering the water.
-        if (now_ms - oldest < WINDOW_MS) return false;
+        if (now_ms - oldest < window_ms_) return false;
         const float mean = sum / static_cast<float>(n);
         if (mean <= 0.0f) return false;
-        return ((mx - mn) / mean) <= TOLERANCE;
+        return ((mx - mn) / mean) <= tolerance_;
     }
 
 private:
@@ -64,4 +70,6 @@ private:
     float    val_[CAP] = {0};
     size_t   head_  = 0;
     size_t   count_ = 0;
+    uint32_t window_ms_ = WINDOW_MS;
+    float    tolerance_ = TOLERANCE;
 };

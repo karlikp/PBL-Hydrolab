@@ -52,20 +52,20 @@ void Elmetron::tick() {
 void Elmetron::tick_hardware(uint32_t elapsed) {
     switch (step_) {
         case ElmetronStep::HOMING:
-            if (advance_)                                  enter_step(ElmetronStep::DESCENDING);
-            else if (elapsed >= elmetron_timing::HOMING_MAX_MS) { enter_state(ElmetronState::FAULT); enter_step(ElmetronStep::NONE); }
+            if (advance_)                          enter_step(ElmetronStep::DESCENDING);
+            else if (elapsed >= homing_max_ms_)  { enter_state(ElmetronState::FAULT); enter_step(ElmetronStep::NONE); }
             break;
         case ElmetronStep::DESCENDING:
-            if (advance_)                                  enter_step(ElmetronStep::IN_WATER);
-            else if (elapsed >= elmetron_timing::DESCENT_MAX_MS) { enter_state(ElmetronState::FAULT); enter_step(ElmetronStep::NONE); }
+            if (advance_)                          enter_step(ElmetronStep::IN_WATER);
+            else if (elapsed >= descent_max_ms_) { enter_state(ElmetronState::FAULT); enter_step(ElmetronStep::NONE); }
             break;
         case ElmetronStep::IN_WATER:
-            if (advance_ || elapsed >= elmetron_timing::MEASURE_MAX_MS)
+            if (advance_ || elapsed >= measure_max_ms_)
                 enter_step(ElmetronStep::ASCENDING);
             break;
         case ElmetronStep::ASCENDING:
-            if (advance_)                                  enter_step(ElmetronStep::HOME);
-            else if (elapsed >= elmetron_timing::ASCENT_MAX_MS) { enter_state(ElmetronState::FAULT); enter_step(ElmetronStep::NONE); }
+            if (advance_)                          enter_step(ElmetronStep::HOME);
+            else if (elapsed >= ascent_max_ms_)  { enter_state(ElmetronState::FAULT); enter_step(ElmetronStep::NONE); }
             break;
         case ElmetronStep::HOME:
             if (elapsed >= elmetron_timing::HOME_MS) {

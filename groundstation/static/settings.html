@@ -96,6 +96,50 @@
         <!-- per-tank cards injected here -->
     </fieldset>
 
+    <fieldset>
+        <legend>Elmetron (measurement probe + winch)</legend>
+        <p class="hint">All UNVERIFIED until the probe/winch are on the bench.
+            Direction/limit flips and the descent timeout are the bring-up knobs.</p>
+        <div class="row">
+            <label for="e-wt">Water-detect threshold (mS/cm)</label>
+            <input type="number" id="e-wt" step="0.1" min="0">
+            <span class="hint">conductivity above this = "in water" (descent trigger)</span>
+        </div>
+        <div class="row">
+            <label for="e-wd">Winch duty (%)</label>
+            <input type="number" id="e-wd" min="1" max="100">
+            <span class="hint">drive speed — affects descent time, so re-check the caps below</span>
+        </div>
+        <div class="row">
+            <label for="e-dto">Descent timeout (s)</label>
+            <input type="number" id="e-dto" min="1" max="30">
+            <span class="hint">mechanical safety cap (max 30); FAULTs if water not reached</span>
+        </div>
+        <div class="row">
+            <label for="e-ato">Ascent timeout (s)</label>
+            <input type="number" id="e-ato" min="1" max="30">
+            <label for="e-hto" style="min-width:120px">Homing timeout (s)</label>
+            <input type="number" id="e-hto" min="1" max="30">
+        </div>
+        <div class="row">
+            <label for="e-mto">Measure timeout (s)</label>
+            <input type="number" id="e-mto" min="1" max="600">
+            <span class="hint">strict cap; ascend even if never converged</span>
+        </div>
+        <div class="row">
+            <label for="e-cw">Convergence window (s)</label>
+            <input type="number" id="e-cw" min="1" max="120">
+            <label for="e-ct" style="min-width:120px">Tolerance (%)</label>
+            <input type="number" id="e-ct" min="1" max="50">
+            <span class="hint">flat to within tolerance over the window = settled</span>
+        </div>
+        <div class="row">
+            <label>Bring-up flips</label>
+            <label class="hint"><input type="checkbox" id="e-di"> invert winch direction</label>
+            <label class="hint"><input type="checkbox" id="e-lal"> limit switch active-low</label>
+        </div>
+    </fieldset>
+
     <div class="actions">
         <button class="btn-save" onclick="save()">Save &amp; provision</button>
         <button class="btn-provision" onclick="reprovision()">Re-provision ESP</button>
@@ -153,6 +197,12 @@
                 <select class="t-channel">${chOpts}</select>
                 <label>Winch servo id</label>
                 <input type="number" class="t-servo" min="1" max="253" value="${t.servo_id}">
+                <label>Servo home / unrolled (0–1023)</label>
+                <span>
+                    <input type="number" class="t-home" min="0" max="1023" value="${t.servo_home}" style="width:80px">
+                    →
+                    <input type="number" class="t-unrolled" min="0" max="1023" value="${t.servo_unrolled}" style="width:80px">
+                </span>
             `;
             const cb = div.querySelector(".t-enabled");
             cb.addEventListener("change", () => {
@@ -170,6 +220,18 @@
         document.getElementById("poll").value = cfg.level_poll_interval_s;
         document.getElementById("timeout").value = cfg.global.pumping_timeout_s;
         buildTankCards(cfg);
+        const e = cfg.elmetron || {};
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+        set("e-wt", e.water_threshold_ms);
+        set("e-wd", e.winch_duty_pct);
+        set("e-dto", e.descent_timeout_s);
+        set("e-ato", e.ascent_timeout_s);
+        set("e-hto", e.homing_timeout_s);
+        set("e-mto", e.measure_timeout_s);
+        set("e-cw", e.convergence_window_s);
+        set("e-ct", e.convergence_tol_pct);
+        document.getElementById("e-di").checked = !!e.winch_dir_invert;
+        document.getElementById("e-lal").checked = !!e.limit_active_low;
     }
 
     function formToConfig() {
@@ -179,8 +241,11 @@
                 enabled: div.querySelector(".t-enabled").checked,
                 channel: parseInt(div.querySelector(".t-channel").value, 10),
                 servo_id: parseInt(div.querySelector(".t-servo").value, 10),
+                servo_home: parseInt(div.querySelector(".t-home").value, 10),
+                servo_unrolled: parseInt(div.querySelector(".t-unrolled").value, 10),
             };
         });
+        const ei = (id) => parseInt(document.getElementById(id).value, 10);
         return {
             serial: {
                 port: document.getElementById("port").value.trim(),
@@ -189,6 +254,18 @@
             level_poll_interval_s: parseFloat(document.getElementById("poll").value),
             global: { pumping_timeout_s: parseInt(document.getElementById("timeout").value, 10) },
             tanks,
+            elmetron: {
+                water_threshold_ms: parseFloat(document.getElementById("e-wt").value),
+                winch_duty_pct: ei("e-wd"),
+                descent_timeout_s: ei("e-dto"),
+                ascent_timeout_s: ei("e-ato"),
+                homing_timeout_s: ei("e-hto"),
+                measure_timeout_s: ei("e-mto"),
+                convergence_window_s: ei("e-cw"),
+                convergence_tol_pct: ei("e-ct"),
+                winch_dir_invert: document.getElementById("e-di").checked,
+                limit_active_low: document.getElementById("e-lal").checked,
+            },
         };
     }
 

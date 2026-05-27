@@ -172,7 +172,8 @@ EVT,<source>,<kind>,<details>*<checksum>
 | `STATE`  | `C1`/`C2`/`C3`           | `EMPTY`, `SAMPLING`, `FULL`, `FAULT` |
 | `STATE`  | `ELMETRON`               | `DOCKED`, `MEASURING`, `FAULT`      |
 | `STATE`  | `SYS`                    | `IDLE`, `SAMPLING`, `MEASURING`, `E_STOP` |
-| `CFG`    | `SYS`                    | Active config readback: `to=<sec>,C1=<en>:<ch>:<servo>,C2=...,C3=...` (reply to `CMD,CFG_GET` / `CMD,STATUS`) |
+| `CFG`    | `SYS`                    | Active tank config readback (reply to `CMD,CFG_GET` / `CMD,STATUS`) |
+| `CFG_ELE`| `SYS`                    | Active Elmetron config readback (reply to `CMD,CFG_ELE_GET` / `CMD,STATUS`) |
 | `STEP`   | `C1`/`C2`/`C3`/`ELMETRON`| `HOMING` (ELMETRON only), `DESCENDING`, `IN_WATER`, `PUMPING` (C1–C3 only), `ASCENDING`, `HOME` |
 | `ACK`    | `SYS`                    | The command that was accepted (e.g. `START_C1`) |
 | `NACK`   | `SYS`                    | The command and why it was rejected (e.g. `START_C2:busy`) |
@@ -244,8 +245,10 @@ CMD,START_C1,*04AB1234
 | `RESET_ELMETRON`   | Clear Elmetron's `FAULT` and move it back to `DOCKED`         |
 | `STATUS`           | Ask the drone for a snapshot — it replies with one `EVT,STATE` per subsystem plus `EVT,SYS,CFG` |
 | `PING`             | Check the link is alive — drone responds `EVT,SYS,ACK,PING`   |
-| `CFG`              | Provision the tank→channel/servo mapping + global timeout. Format: `CMD,CFG,to=<sec>,C1=<en>:<ch>:<servo>,C2=...,C3=...` (e.g. `CMD,CFG,to=90,C1=1:1:1,C2=1:2:2,C3=0:3:3`). Rejected while busy. Held in RAM only — re-sent by the GCS on every boot. |
-| `CFG_GET`          | Drone replies `EVT,SYS,CFG,...` with its active config (readback to confirm provisioning) |
+| `CFG`              | Provision the tank mapping + global timeout. Format: `CMD,CFG,to=<sec>,Cx=<en>:<ch>:<servo>:<home>:<unrolled>,...` — per tank: enabled, pump/sensor channel, servo id, and SC-09 home/unrolled positions (0–1023). E.g. `CMD,CFG,to=90,C1=1:1:1:0:1000,C2=1:2:2:0:1000,C3=0:3:3:0:1000`. Rejected while busy. RAM-only — re-sent by the GCS on every boot. |
+| `CFG_GET`          | Drone replies `EVT,SYS,CFG,...` with its active tank config (readback) |
+| `CFG_ELE`          | Provision Elmetron tuning: `CMD,CFG_ELE,wt=<mS/cm>,wd=<duty%>,dto=<s>,ato=<s>,hto=<s>,mto=<s>,cw=<s>,ct=<%>,di=<0\|1>,lal=<0\|1>` (water threshold, winch duty, descent/ascent/homing/measure timeouts, convergence window+tolerance, direction-invert, limit-active-low). Timeouts ceilinged so the descent safety cap can't be disabled. |
+| `CFG_ELE_GET`      | Drone replies `EVT,SYS,CFG_ELE,...` with its active Elmetron config (readback) |
 | `ELE`              | Diagnostic — drone replies `EVT,SYS,ELE,cond=<mS/cm>,temp=<C>,ph=<>,o2=<mg/L>,water=0\|1,present=0\|1` with the latest raw Elmetron probe reading (`present=0` if no probe is answering on the bus) |
 
 ### What happens after you send a CMD

@@ -47,14 +47,32 @@ enum class SystemMode : uint8_t {
 // Defaults match the historical 1:1 wiring (tank N → channel/servo N),
 // so an un-provisioned board behaves exactly as before.
 struct TankConfig {
-    bool    enabled  = true;
-    uint8_t channel  = 1;   // 1..3 — the fixed PUMP+TOPCN pair
-    uint8_t servo_id = 1;   // SC-09 bus address of this tank's winch
+    bool     enabled  = true;
+    uint8_t  channel  = 1;       // 1..3 — the fixed PUMP+TOPCN pair
+    uint8_t  servo_id = 1;       // SC-09 bus address of this tank's winch
+    uint16_t servo_home     = 0;    // SC-09 stowed/home position (0..1023)
+    uint16_t servo_unrolled = 1000; // SC-09 fully-deployed position
 };
 
 struct SystemConfig {
     uint32_t   pumping_timeout_ms = 90000;
     TankConfig tanks[3];
+};
+
+// Runtime-provisioned Elmetron tuning (CMD,CFG_ELE). Defaults match the
+// module compile-time defaults, so an un-provisioned board is unchanged.
+// Timeouts are seconds on the wire; converted to ms when applied.
+struct ElmetronConfig {
+    float    water_threshold_ms   = 0.7f;  // descent trigger (cond mS/cm)
+    uint8_t  winch_duty_pct       = 60;    // drive speed
+    uint16_t descent_timeout_s    = 4;     // safety cap (ceilinged in firmware)
+    uint16_t ascent_timeout_s     = 5;
+    uint16_t homing_timeout_s     = 4;
+    uint16_t measure_timeout_s    = 90;    // strict measurement cap
+    uint16_t convergence_window_s = 10;
+    uint8_t  convergence_tol_pct  = 5;
+    bool     winch_dir_invert     = false; // flip DOWN/UP if wrong way
+    bool     limit_active_low     = true;
 };
 
 class MissionControl {
@@ -154,7 +172,8 @@ private:
     bool mode_changed_ = false;
     Sampler tanks_[3];
     Collection collections_[3];
-    SystemConfig config_;
+    SystemConfig   config_;
+    ElmetronConfig ele_config_;
     BatteryMonitor* battery_ = nullptr;
     ServoBus*       servo_bus_ = nullptr;
     PumpControl*    pump_control_ = nullptr;
@@ -189,6 +208,8 @@ private:
     void cmd_collections(const char* verb);
     void cmd_cfg(const char* verb, const char* args, size_t args_len);
     void cmd_cfg_get(const char* verb);
+    void cmd_cfg_ele(const char* verb, const char* args, size_t args_len);
+    void cmd_cfg_ele_get(const char* verb);
     void cmd_ele(const char* verb);
 
     void set_mode(SystemMode m);
@@ -207,7 +228,12 @@ private:
     void emit_elmetron_state();
     void emit_elmetron_step();
     void emit_boot(const char* version);
-    void emit_cfg();  // EVT,SYS,CFG,... active provisioned config
+    void emit_cfg();      // EVT,SYS,CFG,... active tank config
+    void emit_cfg_ele();  // EVT,SYS,CFG_ELE,... active Elmetron config
+
+    // Push the active Elmetron config into the probe / winch / FSM /
+    // convergence detector. Guarded — applies only to attached modules.
+    void apply_elmetron_config();
 
     // Push the active config into the per-tank Samplers (timeout) and
     // anywhere else that caches it. Call after config_ changes.

@@ -42,10 +42,39 @@ DEFAULTS = {
         "pumping_timeout_s": 90,  # hard cap on the PUMPING step
     },
     "tanks": {
-        "C1": {"enabled": True, "channel": 1, "servo_id": 1},
-        "C2": {"enabled": True, "channel": 2, "servo_id": 2},
-        "C3": {"enabled": True, "channel": 3, "servo_id": 3},
+        "C1": {"enabled": True, "channel": 1, "servo_id": 1, "servo_home": 0, "servo_unrolled": 1000},
+        "C2": {"enabled": True, "channel": 2, "servo_id": 2, "servo_home": 0, "servo_unrolled": 1000},
+        "C3": {"enabled": True, "channel": 3, "servo_id": 3, "servo_home": 0, "servo_unrolled": 1000},
     },
+    # Elmetron tuning — provisioned via CMD,CFG_ELE. Defaults match the
+    # firmware module defaults. Timeouts in seconds.
+    "elmetron": {
+        "water_threshold_ms": 0.7,    # descent trigger (cond mS/cm)
+        "winch_duty_pct": 60,         # drive speed
+        "descent_timeout_s": 4,       # safety cap (firmware ceiling 30)
+        "ascent_timeout_s": 5,
+        "homing_timeout_s": 4,
+        "measure_timeout_s": 90,      # strict measurement cap
+        "convergence_window_s": 10,
+        "convergence_tol_pct": 5,
+        "winch_dir_invert": False,    # flip if winch goes the wrong way
+        "limit_active_low": True,
+    },
+}
+
+TANK_FIELDS = ("enabled", "channel", "servo_id", "servo_home", "servo_unrolled")
+ELE_FIELDS = (
+    "water_threshold_ms", "winch_duty_pct", "descent_timeout_s",
+    "ascent_timeout_s", "homing_timeout_s", "measure_timeout_s",
+    "convergence_window_s", "convergence_tol_pct", "winch_dir_invert",
+    "limit_active_low",
+)
+# Mirror the firmware ceilings (MissionControl.cpp) so the UI rejects
+# the same values the ESP would NACK.
+ELE_CEILINGS = {
+    "descent_timeout_s": 30, "ascent_timeout_s": 30, "homing_timeout_s": 30,
+    "measure_timeout_s": 600, "convergence_window_s": 120,
+    "convergence_tol_pct": 50, "winch_duty_pct": 100,
 }
 
 
@@ -78,7 +107,10 @@ def _merge_defaults(cfg: dict) -> dict:
             t = cfg["tanks"].get(tid)
             if isinstance(t, dict):
                 out["tanks"][tid].update({k: v for k, v in t.items()
-                                          if k in ("enabled", "channel", "servo_id")})
+                                          if k in TANK_FIELDS})
+    if isinstance(cfg.get("elmetron"), dict):
+        out["elmetron"].update({k: v for k, v in cfg["elmetron"].items()
+                                if k in ELE_FIELDS})
     return out
 
 
@@ -116,6 +148,10 @@ def validate_config(cfg: dict) -> list[str]:
             errors.append(f"{tid}.channel must be one of {VALID_CHANNELS}")
         if not isinstance(sv, int) or not (1 <= sv <= 253):
             errors.append(f"{tid}.servo_id must be an integer 1..253")
+        for pos in ("servo_home", "servo_unrolled"):
+            p = t.get(pos)
+            if not isinstance(p, int) or not (0 <= p <= 1023):
+                errors.append(f"{tid}.{pos} must be an integer 0..1023")
         # Collisions only matter among ENABLED tanks — two disabled tanks
         # can nominally share a channel without consequence.
         if t.get("enabled"):
@@ -132,6 +168,23 @@ def validate_config(cfg: dict) -> list[str]:
                         f"(would collide on the bus)")
                 else:
                     seen_servos[sv] = tid
+
+    # ---- Elmetron section ----
+    e = cfg.get("elmetron", {})
+    wt = e.get("water_threshold_ms")
+    if not isinstance(wt, (int, float)) or not (0.0 < wt <= 200.0):
+        errors.append("elmetron.water_threshold_ms must be 0..200 mS/cm")
+    for key in ("winch_duty_pct", "descent_timeout_s", "ascent_timeout_s",
+                "homing_timeout_s", "measure_timeout_s",
+                "convergence_window_s", "convergence_tol_pct"):
+        v = e.get(key)
+        ceil = ELE_CEILINGS.get(key, 1_000_000)
+        lo = 1
+        if not isinstance(v, int) or not (lo <= v <= ceil):
+            errors.append(f"elmetron.{key} must be an integer {lo}..{ceil}")
+    for key in ("winch_dir_invert", "limit_active_low"):
+        if not isinstance(e.get(key), bool):
+            errors.append(f"elmetron.{key} must be true/false")
     return errors
 
 

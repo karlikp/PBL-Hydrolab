@@ -19,19 +19,20 @@
 
 namespace {
 
-// Per-tank winch endpoints, driven on Sampler step transitions.
-// HOME = stowed/rolled-back, UNROLLED = fully extended for sampling.
-// SC-09 position range is 0..1023; staying slightly inside the
-// extremes avoids hitting mechanical end-stops. Tune these as the
-// physical mechanism gets characterised — the firmware does no other
-// magic, just commands the SC-09 to these absolute positions.
-constexpr uint16_t SAMPLER_HOME_POSITION     = 0;
-constexpr uint16_t SAMPLER_UNROLLED_POSITION = 1000;
+// Per-tank winch endpoints (SC-09 position 0..1023, HOME = stowed,
+// UNROLLED = deployed) are now per-tank config (TankConfig::servo_home
+// / servo_unrolled), provisioned + calibrated from the GCS. The
+// TankConfig NSDMI defaults (0 / 1000) preserve the old hardcoded
+// behaviour until the operator tunes them.
 
-// Elmetron winch drive duty (% of full). The DESCENT/ASCENT safety
-// caps in elmetron_timing:: are sized for roughly this speed — if you
-// change the duty, rescale those caps (slower drive ⇒ longer cap).
-constexpr uint8_t ELMETRON_WINCH_DUTY = 60;
+// Absolute ceilings on the provisioned Elmetron timeouts (seconds).
+// The descent cap is the mechanical safety bound the operator flagged
+// as non-negotiable — config can SHORTEN it but not raise it past this,
+// so a bad config can't disable the protection.
+constexpr uint16_t DESCENT_CEILING_S = 30;
+constexpr uint16_t ASCENT_CEILING_S  = 30;
+constexpr uint16_t HOMING_CEILING_S  = 30;
+constexpr uint16_t MEASURE_CEILING_S = 600;
 
 }  // namespace
 
@@ -166,7 +167,8 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
         && !matches("RESET_C1") && !matches("RESET_C2") && !matches("RESET_C3")
         && !matches("RESET_ELMETRON")
         && !matches("STATUS")   && !matches("PING")     && !matches("E_STOP")
-        && !matches("CFG")      && !matches("CFG_GET")) {
+        && !matches("CFG")      && !matches("CFG_GET")
+        && !matches("CFG_ELE")  && !matches("CFG_ELE_GET")) {
         emit_nack(verb, "e_stop_active");
         return;
     }
@@ -235,6 +237,12 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
     else if (matches("COLLECTIONS"))     cmd_collections(verb);
     else if (matches("ELE"))             cmd_ele(verb);
     else if (matches("CFG_GET"))         cmd_cfg_get(verb);
+    else if (matches("CFG_ELE_GET"))     cmd_cfg_ele_get(verb);
+    else if (matches("CFG_ELE")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_cfg_ele(verb, args, args_len);
+    }
     else if (matches("CFG")) {
         const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
         const size_t args_len = static_cast<size_t>(end - args);
@@ -533,7 +541,7 @@ void MissionControl::cmd_reset_tank(uint8_t idx, const char* verb) {
     // from HOME, matching the operator-mental-model of "reset = back
     // to ready." The SC-09 is closed-loop, so this is reliable.
     if (servo_bus_) {
-        servo_bus_->move(config_.tanks[idx].servo_id, SAMPLER_HOME_POSITION);
+        servo_bus_->move(config_.tanks[idx].servo_id, config_.tanks[idx].servo_home);
     }
 
     // If E-STOP latched and there are no fault tanks left, drop to IDLE.
@@ -615,6 +623,7 @@ void MissionControl::cmd_status(const char* verb) {
     // Active provisioned config, so a reconnecting GCS resyncs its
     // provisioning status from a plain STATUS without a separate CFG_GET.
     emit_cfg();
+    emit_cfg_ele();
     if (battery_) {
         char buf[80];
         snprintf(buf, sizeof(buf), "EVT,SYS,BATTERY,%.2fV/raw=%u/mv=%lu",
@@ -866,13 +875,13 @@ void MissionControl::cmd_level(const char* verb, const char* args, size_t args_l
 // dwells while the rest of the mechanism (pump, end-stops) lands.
 void MissionControl::drive_servo_for_step(const Sampler& tank) {
     if (!servo_bus_) return;
-    const uint8_t servo_id = config_.tanks[tank.id() - 1].servo_id;
+    const TankConfig& tc = config_.tanks[tank.id() - 1];
     switch (tank.step()) {
         case TankStep::DESCENDING:
-            servo_bus_->move(servo_id, SAMPLER_UNROLLED_POSITION);
+            servo_bus_->move(tc.servo_id, tc.servo_unrolled);
             break;
         case TankStep::ASCENDING:
-            servo_bus_->move(servo_id, SAMPLER_HOME_POSITION);
+            servo_bus_->move(tc.servo_id, tc.servo_home);
             break;
         case TankStep::IN_WATER:
         case TankStep::PUMPING:
@@ -915,6 +924,28 @@ void MissionControl::drive_pump_for_step(const Sampler& tank) {
 // dev-kit / mock builds.
 void MissionControl::update_elmetron_mode() {
     if (elmetron_) elmetron_->set_hardware_mode(elmetron_probe_ && winch_);
+    // Push the current Elmetron config to whatever just attached.
+    apply_elmetron_config();
+}
+
+void MissionControl::apply_elmetron_config() {
+    if (elmetron_probe_) {
+        elmetron_probe_->set_water_threshold_ms(ele_config_.water_threshold_ms);
+    }
+    if (winch_) {
+        winch_->set_direction_invert(ele_config_.winch_dir_invert);
+        winch_->set_limit_active_low(ele_config_.limit_active_low);
+    }
+    if (elmetron_) {
+        elmetron_->set_hw_timeouts(
+            static_cast<uint32_t>(ele_config_.descent_timeout_s) * 1000u,
+            static_cast<uint32_t>(ele_config_.ascent_timeout_s)  * 1000u,
+            static_cast<uint32_t>(ele_config_.homing_timeout_s)  * 1000u,
+            static_cast<uint32_t>(ele_config_.measure_timeout_s) * 1000u);
+    }
+    conv_.set_params(
+        static_cast<uint32_t>(ele_config_.convergence_window_s) * 1000u,
+        static_cast<float>(ele_config_.convergence_tol_pct) / 100.0f);
 }
 
 // Drive the winch motor for the current Elmetron step. Set-and-forget:
@@ -926,10 +957,10 @@ void MissionControl::drive_elmetron_winch_for_step() {
     switch (elmetron_->step()) {
         case ElmetronStep::HOMING:
         case ElmetronStep::ASCENDING:
-            winch_->drive(WinchH::Direction::UP, ELMETRON_WINCH_DUTY);
+            winch_->drive(WinchH::Direction::UP, ele_config_.winch_duty_pct);
             break;
         case ElmetronStep::DESCENDING:
-            winch_->drive(WinchH::Direction::DOWN, ELMETRON_WINCH_DUTY);
+            winch_->drive(WinchH::Direction::DOWN, ele_config_.winch_duty_pct);
             break;
         case ElmetronStep::IN_WATER:
         case ElmetronStep::HOME:
@@ -977,22 +1008,29 @@ void MissionControl::service_elmetron_hardware() {
 // stream doesn't carry a stale post-measurement value indefinitely.
 void MissionControl::push_elmetron_reading() {
     if (!telemetry_ || !elmetron_) return;
-    if (elmetron_->state() != ElmetronState::MEASURING) {
-        telemetry_->clear_measurement();
-        return;
-    }
+
+    // Real probe attached: stream its live readings into the heartbeat
+    // ALWAYS (even idle/docked), so the operator can see at a glance
+    // whether the probe is answering. measurement_valid flips true only
+    // once we're settled in water (IN_WATER + converged) — the GCS
+    // only logs to the measurements table while MEASURING anyway, so
+    // idle readings show in the live panel without polluting the DB.
     if (elmetron_->hardware_mode() && elmetron_probe_) {
-        // Real probe: stream live readings; measurement_valid flips true
-        // only once we're settled in water (IN_WATER + converged).
         const ElmetronProbe::Reading& r = elmetron_probe_->last_reading();
-        const bool valid = (elmetron_->step() == ElmetronStep::IN_WATER)
+        const bool valid = elmetron_->state() == ElmetronState::MEASURING
+                           && elmetron_->step() == ElmetronStep::IN_WATER
                            && conv_.converged(clock_.now_ms());
         telemetry_->update_measurement(r.conductivity, r.temperature,
                                        r.ph, r.oxygen, valid);
-    } else {
-        // Synthetic (no hardware): the FSM's ramp.
+        return;
+    }
+
+    // Synthetic (no hardware): ramp during MEASURING, zeros when idle.
+    if (elmetron_->state() == ElmetronState::MEASURING) {
         const Elmetron::Reading r = elmetron_->last_reading();
         telemetry_->update_measurement(r.cond, r.temp, r.ph, r.oxygen, r.valid);
+    } else {
+        telemetry_->clear_measurement();
     }
 }
 
@@ -1111,18 +1149,23 @@ void MissionControl::cmd_cfg(const char* verb, const char* args, size_t args_len
         } else if (tok[0] == 'C' && tok[1] >= '1' && tok[1] <= '3'
                    && tok[2] == '=') {
             const int idx = tok[1] - '1';
-            int en = 0, ch = 0, sv = 0;
-            if (sscanf(tok + 3, "%d:%d:%d", &en, &ch, &sv) != 3) {
-                emit_nack(verb, "bad_args");
-                return;
-            }
+            // Cx = enabled:channel:servo[:home:unrolled]. Home/unrolled
+            // are optional (older 3-field form keeps current values).
+            int en = 0, ch = 0, sv = 0, hm = -1, un = -1;
+            const int got = sscanf(tok + 3, "%d:%d:%d:%d:%d",
+                                   &en, &ch, &sv, &hm, &un);
+            if (got < 3) { emit_nack(verb, "bad_args"); return; }
             if (ch < 1 || ch > 3 || sv < 1 || sv > 253) {
                 emit_nack(verb, "out_of_range");
                 return;
             }
+            if (got >= 4 && (hm < 0 || hm > 1023)) { emit_nack(verb, "bad_servo_pos"); return; }
+            if (got >= 5 && (un < 0 || un > 1023)) { emit_nack(verb, "bad_servo_pos"); return; }
             tmp.tanks[idx].enabled  = (en != 0);
             tmp.tanks[idx].channel  = static_cast<uint8_t>(ch);
             tmp.tanks[idx].servo_id = static_cast<uint8_t>(sv);
+            if (got >= 4) tmp.tanks[idx].servo_home     = static_cast<uint16_t>(hm);
+            if (got >= 5) tmp.tanks[idx].servo_unrolled = static_cast<uint16_t>(un);
         }
         // Unknown tokens ignored (forward-compat per protocol §10).
     }
@@ -1153,17 +1196,88 @@ void MissionControl::cmd_cfg_get(const char* verb) {
     emit_ack(verb);
 }
 
+// CMD,CFG_ELE,wt=..,wd=..,dto=..,ato=..,hto=..,mto=..,cw=..,ct=..,di=..,lal=..
+// — provision the Elmetron tuning (water threshold, winch duty, safety
+// timeouts, convergence, polarity flips). Rejected while busy. Timeouts
+// are ceilinged so a bad value can't disable the mechanical safety caps.
+void MissionControl::cmd_cfg_ele(const char* verb, const char* args, size_t args_len) {
+    if (is_busy()) { emit_nack(verb, "busy"); return; }
+
+    char buf[200];
+    if (args_len == 0 || args_len >= sizeof(buf)) { emit_nack(verb, "bad_args"); return; }
+    memcpy(buf, args, args_len);
+    buf[args_len] = '\0';
+
+    ElmetronConfig tmp = ele_config_;
+    char* save = nullptr;
+    for (char* tok = strtok_r(buf, ",", &save); tok;
+         tok = strtok_r(nullptr, ",", &save)) {
+        char* eq = strchr(tok, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        const char* k = tok;
+        const char* v = eq + 1;
+        if      (!strcmp(k, "wt"))  tmp.water_threshold_ms   = atof(v);
+        else if (!strcmp(k, "wd"))  tmp.winch_duty_pct        = (uint8_t)atoi(v);
+        else if (!strcmp(k, "dto")) tmp.descent_timeout_s     = (uint16_t)atoi(v);
+        else if (!strcmp(k, "ato")) tmp.ascent_timeout_s      = (uint16_t)atoi(v);
+        else if (!strcmp(k, "hto")) tmp.homing_timeout_s      = (uint16_t)atoi(v);
+        else if (!strcmp(k, "mto")) tmp.measure_timeout_s     = (uint16_t)atoi(v);
+        else if (!strcmp(k, "cw"))  tmp.convergence_window_s  = (uint16_t)atoi(v);
+        else if (!strcmp(k, "ct"))  tmp.convergence_tol_pct   = (uint8_t)atoi(v);
+        else if (!strcmp(k, "di"))  tmp.winch_dir_invert      = atoi(v) != 0;
+        else if (!strcmp(k, "lal")) tmp.limit_active_low      = atoi(v) != 0;
+        // unknown keys ignored (forward-compat)
+    }
+
+    if (tmp.water_threshold_ms <= 0.0f || tmp.water_threshold_ms > 200.0f) { emit_nack(verb, "bad_wt"); return; }
+    if (tmp.winch_duty_pct < 1 || tmp.winch_duty_pct > 100)                { emit_nack(verb, "bad_duty"); return; }
+    if (tmp.descent_timeout_s < 1 || tmp.descent_timeout_s > DESCENT_CEILING_S) { emit_nack(verb, "descent_ceiling"); return; }
+    if (tmp.ascent_timeout_s  < 1 || tmp.ascent_timeout_s  > ASCENT_CEILING_S)  { emit_nack(verb, "bad_ato"); return; }
+    if (tmp.homing_timeout_s  < 1 || tmp.homing_timeout_s  > HOMING_CEILING_S)  { emit_nack(verb, "bad_hto"); return; }
+    if (tmp.measure_timeout_s < 1 || tmp.measure_timeout_s > MEASURE_CEILING_S) { emit_nack(verb, "bad_mto"); return; }
+    if (tmp.convergence_window_s < 1 || tmp.convergence_window_s > 120)     { emit_nack(verb, "bad_cw"); return; }
+    if (tmp.convergence_tol_pct  < 1 || tmp.convergence_tol_pct  > 50)      { emit_nack(verb, "bad_ct"); return; }
+
+    ele_config_ = tmp;
+    apply_elmetron_config();
+    emit_ack(verb);
+}
+
+void MissionControl::cmd_cfg_ele_get(const char* verb) {
+    emit_cfg_ele();
+    emit_ack(verb);
+}
+
+// EVT,SYS,CFG_ELE,... — must match the GCS-built string byte-for-byte
+// for the provisioning readback to compare equal.
+void MissionControl::emit_cfg_ele() {
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+        "EVT,SYS,CFG_ELE,wt=%.2f,wd=%d,dto=%d,ato=%d,hto=%d,mto=%d,cw=%d,ct=%d,di=%d,lal=%d",
+        ele_config_.water_threshold_ms, ele_config_.winch_duty_pct,
+        ele_config_.descent_timeout_s, ele_config_.ascent_timeout_s,
+        ele_config_.homing_timeout_s, ele_config_.measure_timeout_s,
+        ele_config_.convergence_window_s, ele_config_.convergence_tol_pct,
+        ele_config_.winch_dir_invert ? 1 : 0, ele_config_.limit_active_low ? 1 : 0);
+    send_payload(buf);
+}
+
 // EVT,SYS,CFG,to=<sec>,C1=<en>:<ch>:<servo>,... — must match the exact
 // string the GCS builds when it provisions, so the readback compares
 // equal. Timeout reported in whole seconds.
 void MissionControl::emit_cfg() {
-    char buf[128];
+    char buf[160];
     snprintf(buf, sizeof(buf),
-        "EVT,SYS,CFG,to=%lu,C1=%d:%d:%d,C2=%d:%d:%d,C3=%d:%d:%d",
+        "EVT,SYS,CFG,to=%lu,"
+        "C1=%d:%d:%d:%d:%d,C2=%d:%d:%d:%d:%d,C3=%d:%d:%d:%d:%d",
         static_cast<unsigned long>(config_.pumping_timeout_ms / 1000u),
         config_.tanks[0].enabled ? 1 : 0, config_.tanks[0].channel, config_.tanks[0].servo_id,
+        config_.tanks[0].servo_home, config_.tanks[0].servo_unrolled,
         config_.tanks[1].enabled ? 1 : 0, config_.tanks[1].channel, config_.tanks[1].servo_id,
-        config_.tanks[2].enabled ? 1 : 0, config_.tanks[2].channel, config_.tanks[2].servo_id);
+        config_.tanks[1].servo_home, config_.tanks[1].servo_unrolled,
+        config_.tanks[2].enabled ? 1 : 0, config_.tanks[2].channel, config_.tanks[2].servo_id,
+        config_.tanks[2].servo_home, config_.tanks[2].servo_unrolled);
     send_payload(buf);
 }
 

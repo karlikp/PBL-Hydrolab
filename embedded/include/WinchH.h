@@ -37,20 +37,27 @@ public:
     bool at_home() const;
     int  raw_limit() const;   // diagnostic: unfiltered digitalRead
 
+    // Bring-up flips, provisioned from the GCS so polarity can be
+    // corrected without a reflash:
+    //   invert=false → DOWN = EN_L high; true → DOWN = EN_R high.
+    void set_direction_invert(bool invert) { down_is_en_l_ = !invert; }
+    //   active_low=true → limit engaged reads LOW (switch-to-GND + pull-up).
+    void set_limit_active_low(bool active_low) { limit_active_low_ = active_low; }
+
     static constexpr uint32_t PWM_FREQ_HZ  = 10000;  // legacy ran 10 kHz
     static constexpr uint8_t  PWM_RES_BITS = 8;      // 0..255 duty
     static constexpr int      PWM_CHANNEL  = 7;      // LEDC ch (nothing else uses LEDC)
 
-    // ASSUMPTION (verify on bench): DOWN drives with EN_L high / EN_R low.
-    // If the winch travels the wrong way, flip this one bool.
-    static constexpr bool DOWN_IS_EN_L = true;
-
-    // H_LIMIT is a switch to GND with an input pull-up → engaged reads LOW.
-    static constexpr bool LIMIT_ACTIVE_LOW = true;
+    // Defaults (verify on bench): DOWN drives EN_L high; limit is
+    // active-low. Both runtime-overridable via the setters above.
+    static constexpr bool DOWN_IS_EN_L_DEFAULT    = true;
+    static constexpr bool LIMIT_ACTIVE_LOW_DEFAULT = true;
 
 private:
     const int en_l_;
     const int en_r_;
     const int pwm_;
     const int limit_;
+    bool down_is_en_l_     = DOWN_IS_EN_L_DEFAULT;
+    bool limit_active_low_ = LIMIT_ACTIVE_LOW_DEFAULT;
 };

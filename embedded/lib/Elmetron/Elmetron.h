@@ -154,6 +154,17 @@ public:
     void set_hardware_mode(bool on) { hardware_mode_ = on; }
     bool hardware_mode() const { return hardware_mode_; }
 
+    // Provision the hardware-mode safety caps (ms). Defaults are the
+    // elmetron_timing constants. These only bound the HARDWARE path;
+    // the synthetic path keeps its own fixed timings.
+    void set_hw_timeouts(uint32_t descent_ms, uint32_t ascent_ms,
+                         uint32_t homing_ms, uint32_t measure_ms) {
+        descent_max_ms_ = descent_ms;
+        ascent_max_ms_  = ascent_ms;
+        homing_max_ms_  = homing_ms;
+        measure_max_ms_ = measure_ms;
+    }
+
     // Notify triggers (hardware mode). Each advances the FSM only when
     // it's in the matching step; otherwise ignored. Idempotent.
     void at_home();           // HOMING / ASCENDING reached the home limit
@@ -183,6 +194,10 @@ private:
     bool          step_changed_    = false;
     bool          hardware_mode_   = false;
     bool          advance_         = false;  // pending hardware trigger
+    uint32_t      descent_max_ms_  = elmetron_timing::DESCENT_MAX_MS;
+    uint32_t      ascent_max_ms_   = elmetron_timing::ASCENT_MAX_MS;
+    uint32_t      homing_max_ms_   = elmetron_timing::HOMING_MAX_MS;
+    uint32_t      measure_max_ms_  = elmetron_timing::MEASURE_MAX_MS;
 
     void enter_state(ElmetronState s);
     void enter_step(ElmetronStep s);

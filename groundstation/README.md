@@ -168,10 +168,20 @@ Per tank you set:
 - **Pump + sensor channel** (1/2/3) — the fixed PUMP+TOPCN pair on the
   board the tank is wired to. They move as a unit.
 - **Winch servo id** — the SC-09 bus address of that tank's winch servo.
+- **Servo home / unrolled** (0–1023) — calibrate each winch's stowed and
+  fully-deployed SC-09 positions (was hardcoded 0/1000).
 
 Plus globals: pumping timeout, the GCS serial **port** (a picker that
 auto-detects attached adapters cross-platform, or type one) and
 **baud**, and the level-poll interval.
+
+There's also an **Elmetron** section (provisioned as a separate
+`CMD,CFG_ELE` frame): water-detect threshold, winch duty, the descent/
+ascent/homing/measure safety timeouts, the convergence window +
+tolerance, and the bring-up flips (invert winch direction, limit
+active-low) — so the unverified probe/winch can be brought up and tuned
+entirely from here. The descent timeout is ceilinged (max 30 s) so the
+mechanical safety cap can't be disabled.
 
 The active config is saved to `config.json` (gitignored; defaults live
 in `app/config.py`). **Save & provision** validates (no two enabled

@@ -27,10 +27,10 @@ void WinchH::drive(Direction dir, uint8_t duty_pct) {
             duty = 0;
             break;
         case Direction::DOWN:
-            if (DOWN_IS_EN_L) en_l = true; else en_r = true;
+            if (down_is_en_l_) en_l = true; else en_r = true;
             break;
         case Direction::UP:
-            if (DOWN_IS_EN_L) en_r = true; else en_l = true;
+            if (down_is_en_l_) en_r = true; else en_l = true;
             break;
     }
     digitalWrite(en_l_, en_l ? HIGH : LOW);
@@ -40,7 +40,7 @@ void WinchH::drive(Direction dir, uint8_t duty_pct) {
 
 bool WinchH::at_home() const {
     const int v = digitalRead(limit_);
-    return LIMIT_ACTIVE_LOW ? (v == LOW) : (v == HIGH);
+    return limit_active_low_ ? (v == LOW) : (v == HIGH);
 }
 
 int WinchH::raw_limit() const {

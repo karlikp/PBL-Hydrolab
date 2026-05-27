@@ -417,16 +417,18 @@
             elStopBtn.disabled  = opState.elmetron.state !== "MEASURING";
             elResetBtn.disabled = opState.elmetron.state !== "FAULT";
 
-            // Live probe readings (only meaningful inside MEASURING)
+            // Live probe readings. With a real probe these stream in the
+            // heartbeat continuously (even when idle), so we show them
+            // whenever a TLM has arrived — the valid dot reflects
+            // measurement_valid (green only once settled in water).
             const tlm = opState.last_tlm;
             const readings = ec.querySelector(".card-readings");
-            const dot = readings.querySelector(".valid-dot");
-            if (tlm && opState.system_mode === "MEASURING") {
+            if (tlm) {
                 readings.classList.toggle("invalid", !tlm.measurement_valid);
                 readings.innerHTML =
                     `cond: ${tlm.cond.toFixed(2)} µS  &nbsp; temp: ${tlm.temp.toFixed(2)}°C<br>` +
                     `pH&nbsp;&nbsp;: ${tlm.ph.toFixed(2)}  &nbsp; O₂&nbsp;&nbsp; : ${tlm.oxygen.toFixed(2)} mg/L` +
-                    `<span class="valid-dot ${tlm.measurement_valid ? "on" : "off"}" title="measurement_valid"></span>`;
+                    `<span class="valid-dot ${tlm.measurement_valid ? "on" : "off"}" title="measurement_valid (green = settled)"></span>`;
             } else {
                 readings.classList.add("invalid");
                 readings.innerHTML =

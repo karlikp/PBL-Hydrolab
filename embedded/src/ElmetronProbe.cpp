@@ -81,7 +81,7 @@ void ElmetronProbe::parse_frame(char* s) {
             r.temperature = atof(tok);       // exclude the "CX" model tag
         }
     }
-    r.water = r.conductivity > WATER_THRESHOLD_MS;
+    r.water = r.conductivity > water_threshold_ms_;
     r.valid = true;
     last_     = r;
     changed_  = true;

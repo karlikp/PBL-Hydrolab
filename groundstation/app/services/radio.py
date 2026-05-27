@@ -158,8 +158,10 @@ class RadioService:
         # reboot re-syncs automatically — ESP holds config in RAM only).
         self.current_config: Optional[dict] = None
         self.auto_provision = True
-        # One-shot future resolved when an EVT,SYS,CFG readback arrives.
+        # One-shot futures resolved when a config readback arrives
+        # (EVT,SYS,CFG for the tank config, EVT,SYS,CFG_ELE for Elmetron).
         self.cfg_readback_future: Optional[asyncio.Future] = None
+        self.cfg_ele_readback_future: Optional[asyncio.Future] = None
 
     # -------- lifecycle --------
 
@@ -295,52 +297,68 @@ class RadioService:
         for tid in TANK_IDS:
             t = cfg["tanks"][tid]
             parts.append(
-                f"{tid}={1 if t['enabled'] else 0}:{t['channel']}:{t['servo_id']}")
+                f"{tid}={1 if t['enabled'] else 0}:{t['channel']}:{t['servo_id']}"
+                f":{t['servo_home']}:{t['servo_unrolled']}")
         return ",".join(parts)
 
-    async def provision(self, cfg: dict) -> dict:
-        """Push `cfg` to the ESP (CMD,CFG) and read it back (CMD,CFG_GET)
-        to confirm. Updates LiveState.provisioning and returns it.
+    def _expected_cfg_ele_details(self, cfg: dict) -> str:
+        e = cfg["elmetron"]
+        return (f"wt={e['water_threshold_ms']:.2f},wd={e['winch_duty_pct']},"
+                f"dto={e['descent_timeout_s']},ato={e['ascent_timeout_s']},"
+                f"hto={e['homing_timeout_s']},mto={e['measure_timeout_s']},"
+                f"cw={e['convergence_window_s']},ct={e['convergence_tol_pct']},"
+                f"di={1 if e['winch_dir_invert'] else 0},"
+                f"lal={1 if e['limit_active_low'] else 0}")
 
-        Until the firmware supports CFG it NACKs unknown_command, which
-        we surface as status 'unsupported' rather than a scary error."""
-        self.current_config = cfg
-        self._set_provisioning("provisioning", None)
-
-        details = self._expected_cfg_details(cfg)
-        args = details.split(",")  # ["to=90", "C1=1:1:1", ...]
-        res = await self.send_cmd_confirmed("CFG", args, timeout=0.8, retries=3)
-
+    async def _provision_one(self, set_verb: str, get_verb: str,
+                             expected: str, readback_attr: str) -> tuple[str, Optional[str]]:
+        """Set one config frame, read it back, compare. Returns
+        (status, detail). status ∈ provisioned/mismatch/unsupported/
+        rejected/no_response."""
+        res = await self.send_cmd_confirmed(set_verb, expected.split(","),
+                                            timeout=0.8, retries=3)
         result = res.get("result")
         if result == "rejected":
             reason = res.get("reason", "")
             if "unknown_command" in reason:
-                self._set_provisioning("unsupported",
-                                       "ESP firmware has no CFG support yet")
-            else:
-                self._set_provisioning("rejected", reason)
-            return self.state.snapshot()["provisioning"]
+                return ("unsupported", f"ESP firmware has no {set_verb} support yet")
+            return ("rejected", reason)
         if result != "confirmed":
-            self._set_provisioning("no_response", None)
-            return self.state.snapshot()["provisioning"]
+            return ("no_response", None)
 
-        # ACK'd — read back to confirm what actually landed.
         loop = asyncio.get_running_loop()
-        self.cfg_readback_future = loop.create_future()
-        self.send_cmd("CFG_GET")
+        fut = loop.create_future()
+        setattr(self, readback_attr, fut)
+        self.send_cmd(get_verb)
         try:
-            readback = await asyncio.wait_for(self.cfg_readback_future, timeout=1.0)
+            readback = await asyncio.wait_for(fut, timeout=1.0)
         except asyncio.TimeoutError:
-            self._set_provisioning("mismatch", "no CFG readback from ESP")
-            return self.state.snapshot()["provisioning"]
+            return ("mismatch", f"no {set_verb} readback from ESP")
         finally:
-            self.cfg_readback_future = None
+            setattr(self, readback_attr, None)
 
-        if readback.strip() == details:
-            self._set_provisioning("provisioned", None)
-        else:
-            self._set_provisioning("mismatch",
-                                   f"ESP reports: {readback}")
+        if readback.strip() == expected:
+            return ("provisioned", None)
+        return ("mismatch", f"ESP reports: {readback}")
+
+    async def provision(self, cfg: dict) -> dict:
+        """Push the full config to the ESP and read it back to confirm:
+        tank config (CMD,CFG) then Elmetron tuning (CMD,CFG_ELE). Both
+        must match for 'provisioned'. Updates LiveState.provisioning."""
+        self.current_config = cfg
+        self._set_provisioning("provisioning", None)
+
+        status, detail = await self._provision_one(
+            "CFG", "CFG_GET", self._expected_cfg_details(cfg),
+            "cfg_readback_future")
+        if status != "provisioned":
+            self._set_provisioning(status, detail)
+            return self.state.snapshot()["provisioning"]
+
+        status, detail = await self._provision_one(
+            "CFG_ELE", "CFG_ELE_GET", self._expected_cfg_ele_details(cfg),
+            "cfg_ele_readback_future")
+        self._set_provisioning(status, detail)
         return self.state.snapshot()["provisioning"]
 
     def _schedule_provision(self):
@@ -571,9 +589,11 @@ class RadioService:
                 # defaults — re-provision it with our config.
                 self._schedule_provision()
                 return
-            if kind == "CFG":
-                # Readback from CMD,CFG_GET — resolve the provision waiter.
-                fut = self.cfg_readback_future
+            if kind == "CFG" or kind == "CFG_ELE":
+                # Readback from CMD,CFG_GET / CMD,CFG_ELE_GET — resolve
+                # the matching provision waiter.
+                fut = (self.cfg_readback_future if kind == "CFG"
+                       else self.cfg_ele_readback_future)
                 loop = self.main_loop
                 if fut is not None and loop is not None:
                     loop.call_soon_threadsafe(
