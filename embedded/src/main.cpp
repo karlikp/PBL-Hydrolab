@@ -317,7 +317,12 @@ void loop() {
     g_controller.tick();
     g_telemetry.tick();
 #ifdef BOARD_ESP32_S3
-#  ifndef UART0_PROTOCOL_LINK
+    // Battery monitor must be gated by BOTH flags, same as its setup()
+    // init — DISABLE_BATTERY_MONITOR skips begin()/attach but tick()
+    // still samples the ADC and can trip shutdown() (drops the power
+    // latch) on the saturated divider. Keep this guard in lock-step
+    // with the setup() guard above.
+#  if !defined(UART0_PROTOCOL_LINK) && !defined(DISABLE_BATTERY_MONITOR)
     g_battery.tick();
 #  endif
     g_gps.tick();
