@@ -110,6 +110,14 @@ def get_config_defaults():
     return cfg_mod.default_config()
 
 
+@router.post("/config/validate")
+def validate_config_endpoint(new_cfg: dict = Body(...)):
+    """Validate a candidate config without saving — lets the settings
+    page report exactly which setting is bad (e.g. before Re-provision)."""
+    errs = cfg_mod.errors_for(new_cfg)
+    return {"valid": not errs, "errors": errs}
+
+
 @router.get("/serial/ports")
 def serial_ports():
     """Enumerate serial ports the OS currently sees (cross-platform via

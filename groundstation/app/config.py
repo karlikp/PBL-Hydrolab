@@ -135,6 +135,13 @@ def validate_config(cfg: dict) -> list[str]:
     return errors
 
 
+def errors_for(cfg: dict) -> list[str]:
+    """Validation errors for an incoming (possibly partial) config —
+    used by the validate-only endpoint so the UI can report what's wrong
+    without saving."""
+    return validate_config(_merge_defaults(cfg))
+
+
 def load_config() -> dict:
     """Load the active config, creating it from DEFAULTS on first run.
 

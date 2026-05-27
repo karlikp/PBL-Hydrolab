@@ -42,6 +42,8 @@
         .prov-provisioned { background: #d1e7dd; color: #0a3622; }
         .prov-mismatch, .prov-rejected, .prov-no_response { background: #f8d7da; color: #842029; }
         .prov-unsupported, .prov-pending, .prov-provisioning { background: #fff3cd; color: #664d03; }
+        .dirty-tag { padding: 8px 12px; border-radius: 6px; background: #fff3cd;
+            color: #664d03; font-size: 0.85em; font-weight: 700; }
     </style>
 </head>
 <body>
@@ -49,7 +51,10 @@
     <header>
         <h1>Drone Settings</h1>
         <a href="/static/index.html">← back to dashboard</a>
-        <span id="prov" class="prov-banner prov-pending" style="margin-left:auto;">provisioning: …</span>
+        <div style="margin-left:auto; display:flex; gap:10px; align-items:center;">
+            <span id="dirty" class="dirty-tag" style="display:none;">● unsaved changes</span>
+            <span id="prov" class="prov-banner prov-pending">provisioning: …</span>
+        </div>
     </header>
 
     <fieldset>
@@ -102,6 +107,23 @@
 
 <script>
     const TANKS = ["C1", "C2", "C3"];
+    // "Dirty" = the form has edits not yet saved. Save/Reset/load clear
+    // it; any user edit sets it. Surfaced so it's never ambiguous that
+    // the form diverges from the committed (and provisioned) config.
+    let dirty = false;
+    function setDirty(v) {
+        dirty = v;
+        document.getElementById("dirty").style.display = v ? "" : "none";
+    }
+    // Programmatic populate() sets .value/.checked which does NOT fire
+    // input/change, so only genuine user edits trip this.
+    document.addEventListener("input", e => {
+        if (e.target.matches("input, select")) setDirty(true);
+    });
+    document.addEventListener("change", e => {
+        if (e.target.matches("input, select")) setDirty(true);
+    });
+
     // Channel = fixed pump+sensor pair on the board.
     const CHANNEL_LABELS = {
         1: "1 — PUMP1 + TOPCN1",
@@ -204,6 +226,7 @@
         await loadPorts();
         const cfg = await (await fetch("/api/config")).json();
         populate(cfg);
+        setDirty(false);
         try {
             const st = await (await fetch("/api/state/now")).json();
             setProv(st.provisioning);
@@ -224,16 +247,40 @@
             return;
         }
         populate(data.config);
+        setDirty(false);
         setProv(data.provisioning);
         const ps = data.provisioning ? data.provisioning.status : "unknown";
         setStatus("ok", `Saved. ESP provisioning: ${ps}.`);
     }
 
     async function reprovision() {
-        setStatus("info", "Re-provisioning ESP…");
+        // Re-provision always re-pushes the last SAVED config — never
+        // the form's unsaved edits. If the form is dirty, validate it
+        // inline so we can name an invalid setting and be explicit that
+        // the saved config is what's going out.
+        let prefix = "", forceBad = false, forceInfo = false;
+        if (dirty) {
+            const v = await (await fetch("/api/config/validate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(formToConfig()),
+            })).json();
+            if (!v.valid) {
+                prefix = `Invalid setting: ${v.errors[0]} — provisioning last saved config instead. `;
+                forceBad = true;
+            } else {
+                prefix = "Unsaved changes — provisioning last saved config (Save to apply). ";
+                forceInfo = true;
+            }
+        }
+        setStatus("info", "Re-provisioning the saved config…");
         const p = await (await fetch("/api/config/provision", { method: "POST" })).json();
         setProv(p);
-        setStatus("ok", `Re-provision: ${p.status}${p.detail ? " (" + p.detail + ")" : ""}.`);
+        let cls = (p.status === "provisioned") ? "ok"
+                : (p.status === "unsupported" || p.status === "pending") ? "info" : "bad";
+        if (forceBad) cls = "bad";
+        else if (forceInfo && cls === "ok") cls = "info";
+        setStatus(cls, `${prefix}Saved-config status: ${p.status}${p.detail ? " (" + p.detail + ")" : ""}.`);
     }
 
     async function resetDefaults() {
@@ -242,6 +289,7 @@
         const res = await fetch("/api/config/reset", { method: "POST" });
         const data = await res.json();
         populate(data.config);
+        setDirty(false);
         setProv(data.provisioning);
         setStatus("ok", "Reset to defaults.");
     }
