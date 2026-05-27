@@ -38,6 +38,7 @@ from datetime import datetime
 from typing import Optional
 
 from app.database import insert_measurement, insert_collection, insert_event
+from app.config import TANK_IDS
 
 
 # Frame size limit per protocol §2 (256 bytes including newline). Be
@@ -96,6 +97,15 @@ class LiveState:
         self.last_tlm_at: Optional[str] = None  # server-side ISO 8601
         self.last_battery_volts: Optional[float] = None
         self.last_gps: dict = {}            # last EVT,SYS,GPS,... payload
+        # Provisioning status of the ESP w.r.t. the GCS config:
+        #   pending       — not attempted yet
+        #   provisioning  — CMD,CFG in flight
+        #   provisioned   — ESP echoed back a config matching ours
+        #   mismatch      — ESP echoed a config that differs
+        #   unsupported   — ESP NACK'd CFG (firmware has no provisioning yet)
+        #   rejected      — ESP NACK'd for another reason
+        #   no_response   — no ACK after retries
+        self.provisioning: dict = {"status": "pending", "detail": None, "at": None}
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -109,6 +119,7 @@ class LiveState:
                 "last_tlm_at": self.last_tlm_at,
                 "last_battery_volts": self.last_battery_volts,
                 "last_gps": dict(self.last_gps),
+                "provisioning": dict(self.provisioning),
             }
 
 
@@ -140,6 +151,15 @@ class RadioService:
         # tools/send_cmd.py does, instead of fire-and-forget.
         self.ack_waiters: dict[str, list] = {}
         self.ack_waiters_lock = threading.Lock()
+
+        # Config the GCS provisions to the ESP. Set by main.py on
+        # startup and on every settings save; used to (re)provision the
+        # ESP on connect and on every EVT,SYS,BOOT (so a mid-mission
+        # reboot re-syncs automatically — ESP holds config in RAM only).
+        self.current_config: Optional[dict] = None
+        self.auto_provision = True
+        # One-shot future resolved when an EVT,SYS,CFG readback arrives.
+        self.cfg_readback_future: Optional[asyncio.Future] = None
 
     # -------- lifecycle --------
 
@@ -244,6 +264,92 @@ class RadioService:
                 self.cancel_ack_waiter(verb, fut)
                 continue
         return {"result": "no_response", "attempts": retries}
+
+    # -------- reconnect (serial port/baud changed in settings) --------
+
+    def reconnect(self, port: str, baud: int):
+        """Tear down the serial thread and reopen on a new port/baud.
+        Called when the settings page changes serial config."""
+        loop = self.main_loop
+        self.stop()
+        self.port = port
+        self.baud = baud
+        if loop:
+            self.start(loop)
+
+    # -------- provisioning --------
+
+    def _set_provisioning(self, status: str, detail: Optional[str]):
+        with self.state.lock:
+            self.state.provisioning = {
+                "status": status,
+                "detail": detail,
+                "at": datetime.utcnow().isoformat(),
+            }
+        self._broadcast({"type": "provisioning",
+                         "provisioning": self.state.snapshot()["provisioning"]})
+
+    def _expected_cfg_details(self, cfg: dict) -> str:
+        to = int(cfg["global"]["pumping_timeout_s"])
+        parts = [f"to={to}"]
+        for tid in TANK_IDS:
+            t = cfg["tanks"][tid]
+            parts.append(
+                f"{tid}={1 if t['enabled'] else 0}:{t['channel']}:{t['servo_id']}")
+        return ",".join(parts)
+
+    async def provision(self, cfg: dict) -> dict:
+        """Push `cfg` to the ESP (CMD,CFG) and read it back (CMD,CFG_GET)
+        to confirm. Updates LiveState.provisioning and returns it.
+
+        Until the firmware supports CFG it NACKs unknown_command, which
+        we surface as status 'unsupported' rather than a scary error."""
+        self.current_config = cfg
+        self._set_provisioning("provisioning", None)
+
+        details = self._expected_cfg_details(cfg)
+        args = details.split(",")  # ["to=90", "C1=1:1:1", ...]
+        res = await self.send_cmd_confirmed("CFG", args, timeout=0.8, retries=3)
+
+        result = res.get("result")
+        if result == "rejected":
+            reason = res.get("reason", "")
+            if "unknown_command" in reason:
+                self._set_provisioning("unsupported",
+                                       "ESP firmware has no CFG support yet")
+            else:
+                self._set_provisioning("rejected", reason)
+            return self.state.snapshot()["provisioning"]
+        if result != "confirmed":
+            self._set_provisioning("no_response", None)
+            return self.state.snapshot()["provisioning"]
+
+        # ACK'd — read back to confirm what actually landed.
+        loop = asyncio.get_running_loop()
+        self.cfg_readback_future = loop.create_future()
+        self.send_cmd("CFG_GET")
+        try:
+            readback = await asyncio.wait_for(self.cfg_readback_future, timeout=1.0)
+        except asyncio.TimeoutError:
+            self._set_provisioning("mismatch", "no CFG readback from ESP")
+            return self.state.snapshot()["provisioning"]
+        finally:
+            self.cfg_readback_future = None
+
+        if readback.strip() == details:
+            self._set_provisioning("provisioned", None)
+        else:
+            self._set_provisioning("mismatch",
+                                   f"ESP reports: {readback}")
+        return self.state.snapshot()["provisioning"]
+
+    def _schedule_provision(self):
+        """Kick off provisioning from the radio thread (e.g. on BOOT)."""
+        cfg = self.current_config
+        loop = self.main_loop
+        if cfg is None or loop is None or not self.auto_provision:
+            return
+        loop.call_soon_threadsafe(lambda: loop.create_task(self.provision(cfg)))
 
     # -------- SSE pub/sub --------
 
@@ -461,6 +567,17 @@ class RadioService:
             if kind == "BOOT":
                 with self.state.lock:
                     self.state.firmware_version = details
+                # A (re)boot means the ESP is back on compile-time
+                # defaults — re-provision it with our config.
+                self._schedule_provision()
+                return
+            if kind == "CFG":
+                # Readback from CMD,CFG_GET — resolve the provision waiter.
+                fut = self.cfg_readback_future
+                loop = self.main_loop
+                if fut is not None and loop is not None:
+                    loop.call_soon_threadsafe(
+                        lambda f=fut, d=details: (not f.done()) and f.set_result(d))
                 return
             if kind == "BATTERY":
                 # Format: "11.40V/raw=4095/mv=3300" — pull the leading float.
@@ -478,17 +595,18 @@ class RadioService:
                     self.state.last_gps = kv
                 return
             if kind == "LEVEL":
-                # EVT,SYS,LEVEL,id=N,full=0|1,raw=0|1 — periodic CMD,LEVEL
-                # poll from the level-poller, used by the operator UI to
-                # show a live wet/dry indicator per tank.
+                # EVT,SYS,LEVEL,id=N,full=0|1,raw=0|1 — N is the PHYSICAL
+                # channel that was polled. Map it back to whichever
+                # logical tank is configured on that channel so the
+                # right card's wet/dry pill updates.
                 kv = parse_kv(details)
                 try:
-                    tank_id = int(kv.get("id", "0"))
+                    channel = int(kv.get("id", "0"))
                     full = kv.get("full") == "1"
                     raw = kv.get("raw") == "1"
                 except ValueError:
                     return
-                tank_key = f"C{tank_id}" if 1 <= tank_id <= 3 else None
+                tank_key = self._tank_for_channel(channel)
                 if tank_key:
                     with self.state.lock:
                         self.state.tank_levels[tank_key] = {
@@ -497,6 +615,19 @@ class RadioService:
                             "received_at": datetime.utcnow().isoformat(),
                         }
                 return
+
+    def _tank_for_channel(self, channel: int) -> Optional[str]:
+        """Map a physical channel back to its logical tank via the active
+        config. Falls back to identity (channel N → CN) when no config is
+        provisioned yet."""
+        cfg = self.current_config
+        if cfg:
+            for tid in TANK_IDS:
+                t = cfg["tanks"].get(tid, {})
+                if t.get("channel") == channel and t.get("enabled"):
+                    return tid
+            return None
+        return f"C{channel}" if 1 <= channel <= 3 else None
 
     def _handle_collected(self, tank: str, details: str):
         """Parse `valid=1,fix=1,lat=...,lon=...,utc=...` and store it."""

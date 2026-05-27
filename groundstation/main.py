@@ -1,11 +1,13 @@
 """Ground station entry point.
 
 Spins up FastAPI + SQLite + the RadioService background thread.
-Configuration lives in env vars so flipping between bench (CP210x at
-115200 on /dev/ttyUSB0) and radio (SiK at 57600 on /dev/ttyUSB1) is a
-one-line change:
 
-    SERIAL_PORT=/dev/ttyUSB1 SERIAL_BAUD=57600 uvicorn main:app --reload
+Serial port/baud and the level-poll interval come from the persisted
+config (settings page), so no env-var flags are needed day to day —
+set them once in the UI. Env vars still override the config for
+one-off runs:
+
+    SERIAL_PORT=/dev/ttyUSB1 SERIAL_BAUD=57600 uvicorn main:app
 
 The radio service is stashed on `app.state.radio_service` so the API
 handlers can reach it without a circular import.
@@ -22,39 +24,31 @@ from fastapi.staticfiles import StaticFiles
 from app.api.endpoints import router as api_router
 from app.database import init_db
 from app.services.radio import RadioService
+from app import config as cfg_mod
 
-
-SERIAL_PORT = os.environ.get("SERIAL_PORT", "/dev/ttyUSB0")
-SERIAL_BAUD = int(os.environ.get("SERIAL_BAUD", "115200"))
-
-# How often to poll STATUS so the operator panel can keep the battery
-# readout fresh without a firmware change. Cheap (~one CMD round-trip),
-# but no need to hammer it.
+# Periodic STATUS refresh (battery / sanity). Cheap; no need to hammer.
 STATUS_POLL_INTERVAL_S = 30.0
-
-# How often to round-robin through CMD,LEVEL,1/2/3 so the UI shows a
-# live wet/dry indicator per tank. One tank per tick. The level pill
-# is valuable debugging feedback so we keep it on the radio, but the
-# uplink chatter competes with operator commands on a duty-cycle-
-# limited link — so the default is throttled (each tank refreshes
-# every ~4.5 s at 1.5 s/tick). Tune with the LEVEL_POLL_INTERVAL_S
-# env var; set it to 0 to disable the poller entirely.
-LEVEL_POLL_INTERVAL_S = float(os.environ.get("LEVEL_POLL_INTERVAL_S", "1.5"))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    cfg = cfg_mod.load_config()
+    app.state.config = cfg
 
-    radio = RadioService(port=SERIAL_PORT, baud=SERIAL_BAUD)
+    # Serial from config, with env-var override for one-off runs.
+    port = os.environ.get("SERIAL_PORT", cfg["serial"]["port"])
+    baud = int(os.environ.get("SERIAL_BAUD", cfg["serial"]["baud"]))
+    level_interval = float(os.environ.get(
+        "LEVEL_POLL_INTERVAL_S", cfg["level_poll_interval_s"]))
+
+    radio = RadioService(port=port, baud=baud)
+    radio.current_config = cfg  # so BOOT-triggered re-provision has it
     loop = asyncio.get_running_loop()
     radio.start(main_loop=loop)
     app.state.radio_service = radio
 
-    # Background task: periodic STATUS refresh for battery / sanity.
     async def status_poller():
-        # Brief initial delay so the link has time to settle and we
-        # don't fire before the listener has even opened the port.
         await asyncio.sleep(5.0)
         while True:
             try:
@@ -63,25 +57,43 @@ async def lifespan(app: FastAPI):
                 print(f"[Poller] STATUS send failed: {e}")
             await asyncio.sleep(STATUS_POLL_INTERVAL_S)
 
-    poller_task = asyncio.create_task(status_poller())
-
     async def level_poller():
-        # Round-robin LEVEL polls so each tank's wet/dry indicator
-        # stays live in the operator panel. Brief warm-up delay so
-        # the radio link has settled before we start chirping.
+        # Round-robin LEVEL polls over the ENABLED tanks only, each at
+        # its configured physical channel, so the wet/dry pills track
+        # the actual wiring. Re-reads app.state.config each pass so a
+        # settings change takes effect without a restart.
         await asyncio.sleep(3.0)
-        tank_id = 1
+        idx = 0
         while True:
-            try:
-                radio.send_cmd("LEVEL", [str(tank_id)])
-            except Exception as e:
-                print(f"[Poller] LEVEL {tank_id} send failed: {e}")
-            tank_id = tank_id % 3 + 1
-            await asyncio.sleep(LEVEL_POLL_INTERVAL_S)
+            current = app.state.config
+            channels = [current["tanks"][t]["channel"]
+                        for t in cfg_mod.enabled_tanks(current)]
+            interval = float(current.get("level_poll_interval_s", 1.5))
+            if channels and interval > 0:
+                ch = channels[idx % len(channels)]
+                idx += 1
+                try:
+                    radio.send_cmd("LEVEL", [str(ch)])
+                except Exception as e:
+                    print(f"[Poller] LEVEL {ch} send failed: {e}")
+                await asyncio.sleep(interval)
+            else:
+                # Polling disabled or no enabled tanks — idle-check slowly.
+                await asyncio.sleep(2.0)
 
-    # LEVEL_POLL_INTERVAL_S <= 0 disables the poller (radio congestion).
-    level_task = (asyncio.create_task(level_poller())
-                  if LEVEL_POLL_INTERVAL_S > 0 else None)
+    async def initial_provision():
+        # Give the listener a moment to open the port, then push the
+        # config. If the ESP later reboots, the BOOT handler re-provisions.
+        await asyncio.sleep(4.0)
+        try:
+            await radio.provision(cfg)
+        except Exception as e:
+            print(f"[Provision] initial provision failed: {e}")
+
+    poller_task = asyncio.create_task(status_poller())
+    level_task = asyncio.create_task(level_poller()) \
+        if level_interval > 0 else None
+    provision_task = asyncio.create_task(initial_provision())
 
     try:
         yield
@@ -89,6 +101,7 @@ async def lifespan(app: FastAPI):
         poller_task.cancel()
         if level_task:
             level_task.cancel()
+        provision_task.cancel()
         radio.stop()
 
 
@@ -112,6 +125,6 @@ def health():
     return {
         "status": "ok",
         "radio_running": bool(radio and radio.running),
-        "port": SERIAL_PORT,
-        "baud": SERIAL_BAUD,
+        "port": getattr(radio, "port", None),
+        "baud": getattr(radio, "baud", None),
     }

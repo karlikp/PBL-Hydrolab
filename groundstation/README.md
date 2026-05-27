@@ -71,6 +71,12 @@ set SERIAL_BAUD=57600
 
 Open <http://127.0.0.1:8000/static/> in a browser.
 
+> **You usually don't need the env vars.** Serial port/baud (and the
+> level-poll interval) are saved in the **Settings page** and reloaded
+> on startup, so once you've set them there, plain `uvicorn main:app`
+> works. The env vars above are just one-off overrides. See
+> [Settings & provisioning](#settings--provisioning).
+
 Useful sister URLs:
 
 - <http://127.0.0.1:8000/health> — quick check that the radio thread is
@@ -147,6 +153,54 @@ EXISTS`) so running against an existing DB just adds the new tables.
   Measurement-trace dots are a separate layer that survives chart
   refreshes.
 
+## Settings & provisioning
+
+The **Settings page** (`/static/settings.html`, linked from the
+dashboard's top bar) decouples the *logical* tanks (C1/C2/C3) from the
+*physical* channels they're wired to, so a rig plugged together
+differently is remapped here instead of rewiring or reflashing.
+
+Per tank you set:
+
+- **Enabled** — uncheck for modules that aren't mounted (e.g. only
+  tanks 1 and 3 present). Disabled tanks are greyed out and locked in
+  the operator panel and aren't level-polled.
+- **Pump + sensor channel** (1/2/3) — the fixed PUMP+TOPCN pair on the
+  board the tank is wired to. They move as a unit.
+- **Winch servo id** — the SC-09 bus address of that tank's winch servo.
+
+Plus globals: pumping timeout, the GCS serial **port** (a picker that
+auto-detects attached adapters cross-platform, or type one) and
+**baud**, and the level-poll interval.
+
+The active config is saved to `config.json` (gitignored; defaults live
+in `app/config.py`). **Save & provision** validates (no two enabled
+tanks may share a channel or servo id), persists, reconnects the serial
+link if the port/baud changed, and **provisions** the config to the
+ESP. A status pill (top bar `CFG:` and the settings banner) shows the
+result:
+
+| Status        | Meaning                                                    |
+|---------------|------------------------------------------------------------|
+| `provisioned` | ESP echoed back a config matching ours (readback verified) |
+| `mismatch`    | ESP echoed a different config / no readback                |
+| `unsupported` | ESP firmware has no `CFG` support yet (see note below)     |
+| `rejected`    | ESP NACK'd for another reason                              |
+| `no_response` | no ACK after retries (link down?)                          |
+| `pending`     | not attempted yet                                          |
+
+Provisioning is pushed on GCS startup, on every save, and automatically
+on every `EVT,SYS,BOOT` (so a mid-mission ESP reboot re-syncs — the ESP
+holds config in RAM only, no firmware persistence).
+
+> **Firmware side is not built yet.** The provisioning *protocol*
+> (`CMD,CFG,to=<sec>,C1=<en>:<ch>:<servo>,…` set + `CMD,CFG_GET` →
+> `EVT,SYS,CFG,…` readback) is implemented on the GCS, but current
+> firmware doesn't understand `CFG` and will NACK it — so the status
+> shows `unsupported` until the firmware phase lands. The GCS-side
+> behaviour (enable/disable, channel-aware level polling, persisted
+> serial config) works today regardless.
+
 ## What gets logged where
 
 Three DB tables, plus an in-memory live state for the operator panel
@@ -173,7 +227,13 @@ the live link indicator. Keeps the measurements table lean.
 | GET    | `/api/measurements/recent`        | Historical measurements (`?limit=` / `?valid_only=true` / `?start=` / `?end=`) |
 | GET    | `/api/collections/recent`         | Historical collections                                                 |
 | GET    | `/api/events/recent`              | Audit log                                                              |
-| POST   | `/api/cmd/{verb}?args=a,b,c`      | Build an Adler-32 framed CMD and write it to the serial port. ACK/NACK comes back through the EVT stream. |
+| POST   | `/api/cmd/{verb}?args=a,b,c`      | Build an Adler-32 framed CMD and write it to the serial port. Waits for ACK/NACK, retries on timeout; returns the outcome. |
+| GET    | `/api/config`                     | Active site config (tank↔channel/servo, timeout, serial, poll).       |
+| GET    | `/api/config/defaults`            | Factory defaults.                                                     |
+| POST   | `/api/config`                     | Validate + save + apply (reconnect serial if changed, re-provision). 422 with an error list on invalid input. |
+| POST   | `/api/config/reset`               | Reset to factory defaults and apply.                                  |
+| POST   | `/api/config/provision`           | Re-push the current config to the ESP without changing it.            |
+| GET    | `/api/serial/ports`               | Enumerate serial ports the OS sees (cross-platform). Powers the settings port picker. |
 | GET    | `/api/data/all_readings`          | Legacy alias; returns measurement rows under the old key names.       |
 
 Examples:

@@ -52,6 +52,16 @@
         .cmd-status.cmd-pending { background: #fff3cd; color: #664d03; }
         .cmd-status.cmd-ok      { background: #d1e7dd; color: #0a3622; }
         .cmd-status.cmd-bad     { background: #f8d7da; color: #842029; }
+        .indicator.prov-provisioned { background: #d1e7dd; color: #0a3622; }
+        .indicator.prov-mismatch, .indicator.prov-rejected,
+        .indicator.prov-no_response { background: #f8d7da; color: #842029; }
+        .indicator.prov-unsupported, .indicator.prov-pending,
+        .indicator.prov-provisioning { background: #fff3cd; color: #664d03; }
+        .settings-link { color: #0d6efd; text-decoration: none; font-size: 0.85em;
+            white-space: nowrap; padding: 5px 8px; }
+        .settings-link:hover { text-decoration: underline; }
+        .op-card.disabled { opacity: 0.5; }
+        .card-cfg { font-size: 0.7em; color: #888; font-weight: 400; }
 
         /* ---------- operator column ---------- */
         .op-card { background: white; border-radius: 8px; padding: 10px 12px;
@@ -163,15 +173,17 @@
             <span id="op-battery" class="indicator">BAT: --</span>
             <span id="op-fw" class="indicator">FW: --</span>
             <span id="op-gps" class="indicator">GPS: --</span>
+            <span id="op-prov" class="indicator" title="ESP provisioning status">CFG: …</span>
         </div>
         <span id="cmd-status" class="cmd-status">ready</span>
+        <a href="/static/settings.html" class="settings-link">⚙ Settings</a>
         <button id="btn-estop" class="btn-estop" onclick="sendCmd('E_STOP')">E-STOP</button>
     </header>
 
     <main id="main-grid">
         <aside id="col-operator">
             <div class="op-card" data-tank="C1">
-                <h3>Tank C1</h3>
+                <h3>Tank C1 <span class="card-cfg"></span></h3>
                 <div class="card-state-row">
                     <div class="card-state st-UNKNOWN">UNKNOWN</div>
                     <div class="card-level lvl-unknown" title="Last level-sensor reading">—</div>
@@ -184,7 +196,7 @@
                 </div>
             </div>
             <div class="op-card" data-tank="C2">
-                <h3>Tank C2</h3>
+                <h3>Tank C2 <span class="card-cfg"></span></h3>
                 <div class="card-state-row">
                     <div class="card-state st-UNKNOWN">UNKNOWN</div>
                     <div class="card-level lvl-unknown" title="Last level-sensor reading">—</div>
@@ -197,7 +209,7 @@
                 </div>
             </div>
             <div class="op-card" data-tank="C3">
-                <h3>Tank C3</h3>
+                <h3>Tank C3 <span class="card-cfg"></span></h3>
                 <div class="card-state-row">
                     <div class="card-state st-UNKNOWN">UNKNOWN</div>
                     <div class="card-level lvl-unknown" title="Last level-sensor reading">—</div>
@@ -290,6 +302,23 @@
             last_gps: {},
             last_tlm_local_ts: 0,   // browser monotonic clock for staleness
         };
+        let opConfig = null;        // active site config (tank↔channel/servo, enabled)
+
+        async function loadConfig() {
+            try {
+                opConfig = await (await fetch("/api/config")).json();
+                renderOpState();
+            } catch (e) { console.error("loadConfig:", e); }
+        }
+
+        function setProvIndicator(p) {
+            const el = document.getElementById("op-prov");
+            if (!el) return;
+            const s = (p && p.status) || "pending";
+            el.textContent = "CFG: " + s;
+            el.className = "indicator prov-" + s;
+            el.title = (p && p.detail) ? p.detail : "ESP provisioning status";
+        }
 
         function setBadgeClass(el, prefix, value) {
             // Strip any old "<prefix>-X" classes and apply the new one.
@@ -332,6 +361,14 @@
                 const card = document.querySelector(`.op-card[data-tank="${tank}"]`);
                 if (!card) continue;
                 const t = opState.tanks[tank];
+                // Config-driven: grey + lock disabled tanks, show channel/servo.
+                const tcfg = opConfig && opConfig.tanks ? opConfig.tanks[tank] : null;
+                const tankEnabled = tcfg ? !!tcfg.enabled : true;
+                card.classList.toggle("disabled", !tankEnabled);
+                const cfgEl = card.querySelector(".card-cfg");
+                if (cfgEl) cfgEl.textContent = tcfg
+                    ? (tankEnabled ? `ch${tcfg.channel} · sv${tcfg.servo_id}` : "disabled")
+                    : "";
                 const stateEl = card.querySelector(".card-state");
                 stateEl.textContent = t.state;
                 setBadgeClass(stateEl, "st", t.state);
@@ -352,16 +389,15 @@
                 const startBtn = card.querySelector(".btn-start");
                 const stopBtn  = card.querySelector(".btn-stop");
                 const resetBtn = card.querySelector(".btn-reset");
-                // Disable Start when busy or tank can't be started.
-                startBtn.disabled = busy
+                // Disabled tanks can't be operated at all from the UI.
+                // Otherwise: Start when idle, Stop while sampling, Reset
+                // from FAULT/FULL.
+                startBtn.disabled = !tankEnabled || busy
                     || t.state === "SAMPLING"
                     || t.state === "FULL"
                     || t.state === "FAULT";
-                // Stop is the per-subsystem abort — only meaningful
-                // while the tank is actively sampling.
-                stopBtn.disabled = t.state !== "SAMPLING";
-                // Reset is only meaningful from FAULT (or FULL between cycles).
-                resetBtn.disabled = !(t.state === "FAULT" || t.state === "FULL");
+                stopBtn.disabled = !tankEnabled || t.state !== "SAMPLING";
+                resetBtn.disabled = !tankEnabled || !(t.state === "FAULT" || t.state === "FULL");
             }
 
             // Elmetron card
@@ -487,6 +523,7 @@
                 // We can't know the actual age across the snapshot; treat as fresh
                 opState.last_tlm_local_ts = Date.now();
             }
+            if (s.provisioning) setProvIndicator(s.provisioning);
             renderOpState();
         }
 
@@ -577,6 +614,8 @@
                     applyEvt(msg.source, msg.kind, msg.details);
                 } else if (msg.type === "tlm") {
                     applyTlm(msg.tlm);
+                } else if (msg.type === "provisioning") {
+                    setProvIndicator(msg.provisioning);
                 }
             };
             es.onerror = () => {
@@ -586,6 +625,7 @@
         }
 
         document.addEventListener("DOMContentLoaded", () => {
+            loadConfig();
             renderOpState();
             openSSE();
         });

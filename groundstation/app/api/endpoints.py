@@ -23,7 +23,7 @@ import asyncio
 import json
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Body, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
 from app.database import (
@@ -31,6 +31,7 @@ from app.database import (
     get_recent_collections,
     get_recent_events,
 )
+from app import config as cfg_mod
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -92,6 +93,91 @@ def legacy_all_readings(limit: int = Query(5000, ge=1, le=20000)):
         "measurement_valid": bool(r["measurement_valid"]),
     } for r in rows]
     return {"count": len(readings), "readings": readings}
+
+
+# ---------------- configuration ----------------
+
+@router.get("/config")
+def get_config(request: Request):
+    """The active site config (tank↔channel/servo mapping, timeout,
+    serial, poll interval)."""
+    return getattr(request.app.state, "config", cfg_mod.load_config())
+
+
+@router.get("/config/defaults")
+def get_config_defaults():
+    """Factory defaults — used by the settings page's Reset preview."""
+    return cfg_mod.default_config()
+
+
+@router.get("/serial/ports")
+def serial_ports():
+    """Enumerate serial ports the OS currently sees (cross-platform via
+    pyserial). Powers the settings-page port picker. Linux shows
+    /dev/ttyUSB*, Windows COMx, macOS /dev/cu.*."""
+    try:
+        from serial.tools import list_ports
+    except Exception as e:
+        return {"ports": [], "error": str(e)}
+    ports = []
+    for p in sorted(list_ports.comports(), key=lambda x: x.device):
+        desc = (p.description or "").strip()
+        # Skip phantom native serial ports (Linux lists 32× /dev/ttyS*
+        # with no USB vid and an "n/a" description). USB adapters — the
+        # CP210x / FTDI we actually use — carry a vid. The datalist still
+        # lets the user type any port, so filtering here loses nothing.
+        if p.vid is None and desc in ("", "n/a"):
+            continue
+        ports.append({
+            "device": p.device,
+            "description": "" if desc == "n/a" else desc,
+        })
+    return {"ports": ports}
+
+
+async def _apply_config(request: Request, new_cfg: dict):
+    """Persist, swap into app.state, reconnect serial if changed,
+    re-provision. Returns the stored config + provisioning result."""
+    try:
+        stored = cfg_mod.save_config(new_cfg)
+    except cfg_mod.ConfigError as e:
+        raise HTTPException(status_code=422, detail={"errors": e.errors})
+
+    old = getattr(request.app.state, "config", None)
+    request.app.state.config = stored
+
+    radio = getattr(request.app.state, "radio_service", None)
+    provisioning = {"status": "pending", "detail": "no radio service"}
+    if radio is not None:
+        radio.current_config = stored
+        # Reconnect only if the serial settings actually changed.
+        if old is None or old.get("serial") != stored.get("serial"):
+            radio.reconnect(stored["serial"]["port"], stored["serial"]["baud"])
+        provisioning = await radio.provision(stored)
+
+    return {"config": stored, "provisioning": provisioning}
+
+
+@router.post("/config")
+async def post_config(request: Request, new_cfg: dict = Body(...)):
+    """Validate + save a full config, then apply it (reconnect serial if
+    changed, re-provision the ESP). 422 with an error list on invalid
+    input — nothing is persisted in that case."""
+    return await _apply_config(request, new_cfg)
+
+
+@router.post("/config/reset")
+async def reset_config(request: Request):
+    """Reset to factory defaults and apply."""
+    return await _apply_config(request, cfg_mod.default_config())
+
+
+@router.post("/config/provision")
+async def reprovision(request: Request):
+    """Re-push the current config to the ESP without changing it."""
+    radio = _radio(request)
+    cfg = getattr(request.app.state, "config", cfg_mod.load_config())
+    return await radio.provision(cfg)
 
 
 # ---------------- live state ----------------

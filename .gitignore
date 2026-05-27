@@ -14,6 +14,9 @@ __pycache__/
 *.sqlite
 *.db
 
+# Ground-station active config (site-specific; defaults live in app/config.py)
+config.json
+
 # Narzędzia IDE i systemowe (VS Code)
 .vscode/
 .idea/
