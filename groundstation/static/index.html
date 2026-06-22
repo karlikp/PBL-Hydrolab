@@ -426,7 +426,7 @@
             if (tlm) {
                 readings.classList.toggle("invalid", !tlm.measurement_valid);
                 readings.innerHTML =
-                    `cond: ${tlm.cond.toFixed(2)} µS  &nbsp; temp: ${tlm.temp.toFixed(2)}°C<br>` +
+                    `cond: ${tlm.cond.toFixed(2)} mS/cm  &nbsp; temp: ${tlm.temp.toFixed(2)}°C<br>` +
                     `pH&nbsp;&nbsp;: ${tlm.ph.toFixed(2)}  &nbsp; O₂&nbsp;&nbsp; : ${tlm.oxygen.toFixed(2)} mg/L` +
                     `<span class="valid-dot ${tlm.measurement_valid ? "on" : "off"}" title="measurement_valid (green = settled)"></span>`;
             } else {
