@@ -1185,10 +1185,10 @@ void MissionControl::drive_elmetron_winch_for_step() {
     switch (elmetron_->step()) {
         case ElmetronStep::HOMING:
         case ElmetronStep::ASCENDING:
-            winch_->drive(WinchH::Direction::UP, ele_config_.winch_duty_pct);
+            winch_->drive(WinchH::Direction::UP, ele_config_.winch_up_duty_pct);
             break;
         case ElmetronStep::DESCENDING:
-            winch_->drive(WinchH::Direction::DOWN, ele_config_.winch_duty_pct);
+            winch_->drive(WinchH::Direction::DOWN, ele_config_.winch_down_duty_pct);
             break;
         case ElmetronStep::IN_WATER:
         case ElmetronStep::HOME:
@@ -1432,10 +1432,13 @@ void MissionControl::cmd_cfg_get(const char* verb) {
     emit_ack(verb);
 }
 
-// CMD,CFG_ELE,wt=..,wd=..,dto=..,ato=..,hto=..,mto=..,cw=..,ct=..,di=..,lal=..
-// — provision the Elmetron tuning (water threshold, winch duty, safety
-// timeouts, convergence, polarity flips). Rejected while busy. Timeouts
-// are ceilinged so a bad value can't disable the mechanical safety caps.
+// CMD,CFG_ELE,wt=..,wdd=..,wdu=..,dto=..,ato=..,hto=..,mto=..,cw=..,ct=..,di=..,lal=..
+// — provision the Elmetron tuning (water threshold, winch duty DOWN/UP,
+// safety timeouts, convergence, polarity flips). Rejected while busy.
+// Timeouts are ceilinged so a bad value can't disable the mechanical
+// safety caps. Separate duty per direction: slower DOWN gives the
+// conductivity-water-detect trigger time to fire before overshoot,
+// faster UP cuts the wait at the end of the cycle.
 void MissionControl::cmd_cfg_ele(const char* verb, const char* args, size_t args_len) {
     if (is_busy()) { emit_nack(verb, "busy"); return; }
 
@@ -1454,7 +1457,8 @@ void MissionControl::cmd_cfg_ele(const char* verb, const char* args, size_t args
         const char* k = tok;
         const char* v = eq + 1;
         if      (!strcmp(k, "wt"))  tmp.water_threshold_ms   = atof(v);
-        else if (!strcmp(k, "wd"))  tmp.winch_duty_pct        = (uint8_t)atoi(v);
+        else if (!strcmp(k, "wdd")) tmp.winch_down_duty_pct   = (uint8_t)atoi(v);
+        else if (!strcmp(k, "wdu")) tmp.winch_up_duty_pct     = (uint8_t)atoi(v);
         else if (!strcmp(k, "dto")) tmp.descent_timeout_s     = (uint16_t)atoi(v);
         else if (!strcmp(k, "ato")) tmp.ascent_timeout_s      = (uint16_t)atoi(v);
         else if (!strcmp(k, "hto")) tmp.homing_timeout_s      = (uint16_t)atoi(v);
@@ -1467,7 +1471,8 @@ void MissionControl::cmd_cfg_ele(const char* verb, const char* args, size_t args
     }
 
     if (tmp.water_threshold_ms <= 0.0f || tmp.water_threshold_ms > 200.0f) { emit_nack(verb, "bad_wt"); return; }
-    if (tmp.winch_duty_pct < 1 || tmp.winch_duty_pct > 100)                { emit_nack(verb, "bad_duty"); return; }
+    if (tmp.winch_down_duty_pct < 1 || tmp.winch_down_duty_pct > 100)      { emit_nack(verb, "bad_duty_down"); return; }
+    if (tmp.winch_up_duty_pct   < 1 || tmp.winch_up_duty_pct   > 100)      { emit_nack(verb, "bad_duty_up");   return; }
     if (tmp.descent_timeout_s < 1 || tmp.descent_timeout_s > DESCENT_CEILING_S) { emit_nack(verb, "descent_ceiling"); return; }
     if (tmp.ascent_timeout_s  < 1 || tmp.ascent_timeout_s  > ASCENT_CEILING_S)  { emit_nack(verb, "bad_ato"); return; }
     if (tmp.homing_timeout_s  < 1 || tmp.homing_timeout_s  > HOMING_CEILING_S)  { emit_nack(verb, "bad_hto"); return; }
@@ -1488,10 +1493,11 @@ void MissionControl::cmd_cfg_ele_get(const char* verb) {
 // EVT,SYS,CFG_ELE,... — must match the GCS-built string byte-for-byte
 // for the provisioning readback to compare equal.
 void MissionControl::emit_cfg_ele() {
-    char buf[160];
+    char buf[180];
     snprintf(buf, sizeof(buf),
-        "EVT,SYS,CFG_ELE,wt=%.2f,wd=%d,dto=%d,ato=%d,hto=%d,mto=%d,cw=%d,ct=%d,di=%d,lal=%d",
-        ele_config_.water_threshold_ms, ele_config_.winch_duty_pct,
+        "EVT,SYS,CFG_ELE,wt=%.2f,wdd=%d,wdu=%d,dto=%d,ato=%d,hto=%d,mto=%d,cw=%d,ct=%d,di=%d,lal=%d",
+        ele_config_.water_threshold_ms,
+        ele_config_.winch_down_duty_pct, ele_config_.winch_up_duty_pct,
         ele_config_.descent_timeout_s, ele_config_.ascent_timeout_s,
         ele_config_.homing_timeout_s, ele_config_.measure_timeout_s,
         ele_config_.convergence_window_s, ele_config_.convergence_tol_pct,

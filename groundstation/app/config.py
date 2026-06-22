@@ -57,7 +57,8 @@ DEFAULTS = {
     # firmware module defaults. Timeouts in seconds.
     "elmetron": {
         "water_threshold_ms": 0.35,    # descent trigger (cond mS/cm)
-        "winch_duty_pct": 65,         # drive speed
+        "winch_down_duty_pct": 50,    # DESCENDING speed (slower = water-detect fires before overshoot)
+        "winch_up_duty_pct":   80,    # ASCENDING / HOMING speed (faster = less wait at cycle end)
         "descent_timeout_s": 5,       # safety cap (firmware ceiling 30)
         "ascent_timeout_s": 5,
         "homing_timeout_s": 5,
@@ -72,17 +73,19 @@ DEFAULTS = {
 TANK_FIELDS = ("enabled", "channel", "servo_id",
                "winch_unroll_ms", "winch_roll_ms", "winch_pwm")
 ELE_FIELDS = (
-    "water_threshold_ms", "winch_duty_pct", "descent_timeout_s",
-    "ascent_timeout_s", "homing_timeout_s", "measure_timeout_s",
-    "convergence_window_s", "convergence_tol_pct", "winch_dir_invert",
-    "limit_active_low",
+    "water_threshold_ms",
+    "winch_down_duty_pct", "winch_up_duty_pct",
+    "descent_timeout_s", "ascent_timeout_s", "homing_timeout_s",
+    "measure_timeout_s", "convergence_window_s", "convergence_tol_pct",
+    "winch_dir_invert", "limit_active_low",
 )
 # Mirror the firmware ceilings (MissionControl.cpp) so the UI rejects
 # the same values the ESP would NACK.
 ELE_CEILINGS = {
     "descent_timeout_s": 30, "ascent_timeout_s": 30, "homing_timeout_s": 30,
     "measure_timeout_s": 600, "convergence_window_s": 120,
-    "convergence_tol_pct": 50, "winch_duty_pct": 100,
+    "convergence_tol_pct": 50,
+    "winch_down_duty_pct": 100, "winch_up_duty_pct": 100,
 }
 
 
@@ -117,6 +120,15 @@ def _merge_defaults(cfg: dict) -> dict:
                 out["tanks"][tid].update({k: v for k, v in t.items()
                                           if k in TANK_FIELDS})
     if isinstance(cfg.get("elmetron"), dict):
+        # Migration: pre-split duty (single winch_duty_pct field) → seed
+        # both per-direction fields with the old value so users don't
+        # lose their tuning when the schema changes.
+        legacy_duty = cfg["elmetron"].get("winch_duty_pct")
+        if isinstance(legacy_duty, int):
+            if "winch_down_duty_pct" not in cfg["elmetron"]:
+                out["elmetron"]["winch_down_duty_pct"] = legacy_duty
+            if "winch_up_duty_pct" not in cfg["elmetron"]:
+                out["elmetron"]["winch_up_duty_pct"] = legacy_duty
         out["elmetron"].update({k: v for k, v in cfg["elmetron"].items()
                                 if k in ELE_FIELDS})
     return out
@@ -185,7 +197,8 @@ def validate_config(cfg: dict) -> list[str]:
     wt = e.get("water_threshold_ms")
     if not isinstance(wt, (int, float)) or not (0.0 < wt <= 200.0):
         errors.append("elmetron.water_threshold_ms must be 0..200 mS/cm")
-    for key in ("winch_duty_pct", "descent_timeout_s", "ascent_timeout_s",
+    for key in ("winch_down_duty_pct", "winch_up_duty_pct",
+                "descent_timeout_s", "ascent_timeout_s",
                 "homing_timeout_s", "measure_timeout_s",
                 "convergence_window_s", "convergence_tol_pct"):
         v = e.get(key)

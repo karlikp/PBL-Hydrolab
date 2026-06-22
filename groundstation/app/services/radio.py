@@ -303,7 +303,8 @@ class RadioService:
 
     def _expected_cfg_ele_details(self, cfg: dict) -> str:
         e = cfg["elmetron"]
-        return (f"wt={e['water_threshold_ms']:.2f},wd={e['winch_duty_pct']},"
+        return (f"wt={e['water_threshold_ms']:.2f},"
+                f"wdd={e['winch_down_duty_pct']},wdu={e['winch_up_duty_pct']},"
                 f"dto={e['descent_timeout_s']},ato={e['ascent_timeout_s']},"
                 f"hto={e['homing_timeout_s']},mto={e['measure_timeout_s']},"
                 f"cw={e['convergence_window_s']},ct={e['convergence_tol_pct']},"

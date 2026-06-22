@@ -77,16 +77,17 @@ struct SystemConfig {
 // module compile-time defaults, so an un-provisioned board is unchanged.
 // Timeouts are seconds on the wire; converted to ms when applied.
 struct ElmetronConfig {
-    float    water_threshold_ms   = 0.7f;  // descent trigger (cond mS/cm)
-    uint8_t  winch_duty_pct       = 60;    // drive speed
-    uint16_t descent_timeout_s    = 4;     // safety cap (ceilinged in firmware)
-    uint16_t ascent_timeout_s     = 5;
-    uint16_t homing_timeout_s     = 4;
-    uint16_t measure_timeout_s    = 90;    // strict measurement cap
-    uint16_t convergence_window_s = 10;
-    uint8_t  convergence_tol_pct  = 5;
-    bool     winch_dir_invert     = false; // flip DOWN/UP if wrong way
-    bool     limit_active_low     = true;
+    float    water_threshold_ms     = 0.7f;  // descent trigger (cond mS/cm)
+    uint8_t  winch_down_duty_pct    = 50;    // DESCENDING speed (slower → conductivity trigger fires before overshoot)
+    uint8_t  winch_up_duty_pct      = 80;    // ASCENDING / HOMING speed (faster → less wait at end of cycle)
+    uint16_t descent_timeout_s      = 4;     // safety cap (ceilinged in firmware)
+    uint16_t ascent_timeout_s       = 5;
+    uint16_t homing_timeout_s       = 4;
+    uint16_t measure_timeout_s      = 90;    // strict measurement cap
+    uint16_t convergence_window_s   = 10;
+    uint8_t  convergence_tol_pct    = 5;
+    bool     winch_dir_invert       = false; // flip DOWN/UP if wrong way
+    bool     limit_active_low       = true;
 };
 
 class MissionControl {
