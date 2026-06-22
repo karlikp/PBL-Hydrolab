@@ -114,6 +114,14 @@
             cursor: pointer; min-width: 0; }
         .card-jog button:hover { background: #5a6268; }
         .card-jog button:disabled { background: #adb5bd; cursor: not-allowed; }
+        .card-pump { display: flex; gap: 4px; margin-top: 2px; }
+        .card-pump button { flex: 1; padding: 3px 0; font-size: 0.75em;
+            color: white; border: none; border-radius: 3px; cursor: pointer;
+            min-width: 0; }
+        .card-pump .pump-on  { background: #198754; }
+        .card-pump .pump-on:hover  { background: #146c43; }
+        .card-pump .pump-off { background: #6c757d; }
+        .card-pump .pump-off:hover { background: #5a6268; }
         .card-readings { grid-area: extras; font-size: 0.78em; color: #444;
             font-variant-numeric: tabular-nums; line-height: 1.45;
             border-top: 1px dashed #dee2e6; padding-top: 6px; margin-top: 2px; }
@@ -203,6 +211,10 @@
                         <button onclick="sendCmd('JOG_C1_UP')"   title="Manual jog UP (rewind direction, 300ms)">↑</button>
                         <button onclick="sendCmd('JOG_C1_DOWN')" title="Manual jog DOWN (unroll direction, 300ms)">↓</button>
                     </div>
+                    <div class="card-pump">
+                        <button class="pump-on"  onclick="sendPump('C1', 1)" title="Pump ON (tank C1's mapped channel)">Pump ON</button>
+                        <button class="pump-off" onclick="sendPump('C1', 0)" title="Pump OFF">OFF</button>
+                    </div>
                 </div>
             </div>
             <div class="op-card" data-tank="C2">
@@ -220,6 +232,10 @@
                         <button onclick="sendCmd('JOG_C2_UP')"   title="Manual jog UP (rewind direction, 300ms)">↑</button>
                         <button onclick="sendCmd('JOG_C2_DOWN')" title="Manual jog DOWN (unroll direction, 300ms)">↓</button>
                     </div>
+                    <div class="card-pump">
+                        <button class="pump-on"  onclick="sendPump('C2', 1)" title="Pump ON (tank C2's mapped channel)">Pump ON</button>
+                        <button class="pump-off" onclick="sendPump('C2', 0)" title="Pump OFF">OFF</button>
+                    </div>
                 </div>
             </div>
             <div class="op-card" data-tank="C3">
@@ -236,6 +252,10 @@
                     <div class="card-jog">
                         <button onclick="sendCmd('JOG_C3_UP')"   title="Manual jog UP (rewind direction, 300ms)">↑</button>
                         <button onclick="sendCmd('JOG_C3_DOWN')" title="Manual jog DOWN (unroll direction, 300ms)">↓</button>
+                    </div>
+                    <div class="card-pump">
+                        <button class="pump-on"  onclick="sendPump('C3', 1)" title="Pump ON (tank C3's mapped channel)">Pump ON</button>
+                        <button class="pump-off" onclick="sendPump('C3', 0)" title="Pump OFF">OFF</button>
                     </div>
                 </div>
             </div>
@@ -499,6 +519,15 @@
             }
             el.textContent = text;
             el.className = "cmd-status " + cls;
+        }
+
+        // Manual pump toggle. `tank` is "C1"/"C2"/"C3", state is 1 (on)
+        // or 0 (off). Resolves to the physical pump channel via the
+        // active config — same mapping the wet/dry pill uses.
+        function sendPump(tank, state) {
+            const cfg = opConfig && opConfig.tanks && opConfig.tanks[tank];
+            if (!cfg) { appendLog(`Pump: no config for ${tank}`, "log-error"); return; }
+            sendCmd("PUMP", [String(cfg.channel), String(state)]);
         }
 
         async function sendCmd(verb, args) {
