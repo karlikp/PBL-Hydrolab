@@ -9,8 +9,76 @@
 // write has landed. Used by set_id and the PWM/position-mode helpers.
 static constexpr uint32_t EEPROM_COMMIT_MS = 20;
 
+// Half-duplex echo-drain wrapper.
+//
+// The SC-09 bus is a single wire shared between TX and RX. Every byte
+// the ESP transmits is also echoed back into its own RX. The stock
+// SCServo library's wFlushSCS() is a no-op, so after writing a request
+// the library immediately tries to read the reply — and reads the
+// ECHO of its own request instead. This breaks every read in the lib
+// (ReadPos returns 14338 = the request's MemAddr byte plus garbage,
+// Ping always "succeeds" because the echoed header matches the reply
+// header shape, and Acks on writes erratically fail/pass).
+//
+// We override:
+//   writeSCS variants → count outgoing bytes into echo_pending_
+//   rFlushSCS         → reset echo_pending_ (drains old RX anyway)
+//   wFlushSCS         → flush TX to the wire, then read and discard
+//                       exactly echo_pending_ bytes from RX (the echo)
+//
+// After wFlushSCS, the RX buffer holds only the servo's actual reply
+// (if any) — the lib's checkHead/readSCS see clean data.
+class EchoDrainSCSCL : public SCSCL {
+public:
+    EchoDrainSCSCL() : SCSCL() {}
+
+protected:
+    int echo_pending_ = 0;
+
+    int writeSCS(unsigned char* nDat, int nLen) override {
+        const int wrote = SCSerial::writeSCS(nDat, nLen);
+        if (wrote > 0) echo_pending_ += wrote;
+        return wrote;
+    }
+
+    int writeSCS(unsigned char bDat) override {
+        const int wrote = SCSerial::writeSCS(bDat);
+        if (wrote > 0) echo_pending_ += wrote;
+        return wrote;
+    }
+
+    void rFlushSCS() override {
+        SCSerial::rFlushSCS();
+        echo_pending_ = 0;
+    }
+
+    void wFlushSCS() override {
+        // Wait for TX to physically reach the wire (base wFlushSCS is
+        // empty; we use the underlying Stream's flush).
+        if (pSerial) pSerial->flush();
+        if (!pSerial || echo_pending_ <= 0) {
+            echo_pending_ = 0;
+            return;
+        }
+        // Drain exactly echo_pending_ bytes from RX. At 1 Mbps each
+        // byte is 10 µs in flight; budget 5 ms hard cap so a missing
+        // echo (cable yanked mid-send, ...) doesn't hang the loop.
+        int drained = 0;
+        const unsigned long t_start = micros();
+        while (drained < echo_pending_) {
+            const int c = pSerial->read();
+            if (c != -1) {
+                drained++;
+            } else if (micros() - t_start > 5000) {
+                break;
+            }
+        }
+        echo_pending_ = 0;
+    }
+};
+
 struct ServoBus::Impl {
-    SCSCL sc;
+    EchoDrainSCSCL sc;
 };
 
 ServoBus::ServoBus(HardwareSerial& serial) : impl_(new Impl()) {
