@@ -217,6 +217,7 @@ private:
     //                         (-1 = no successful poll yet this run)
     //   winch_last_poll_ms_ : rate-limits the ReadPos polls
     bool     winch_active_[3]          = {false, false, false};
+    bool     winch_jog_[3]             = {false, false, false};  // manual jog → pure time-based stop
     int8_t   winch_direction_[3]       = {0, 0, 0};
     uint32_t winch_safety_stop_[3]     = {0, 0, 0};
     int32_t  winch_cumulative_[3]      = {0, 0, 0};
@@ -235,6 +236,7 @@ private:
     void cmd_ping(const char* verb);
     void cmd_adc_scan(const char* verb);
     void cmd_servo_move(const char* verb, const char* args, size_t args_len);
+    void cmd_jog(uint8_t idx, int8_t sign, const char* verb);
     void cmd_servo_set_id(const char* verb, const char* args, size_t args_len);
     void cmd_servo_bcast_set_id(const char* verb, const char* args, size_t args_len);
     void cmd_servo_ping(const char* verb, const char* args, size_t args_len);
