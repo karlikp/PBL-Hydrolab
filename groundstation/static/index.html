@@ -585,15 +585,31 @@
                 });
                 opState.last_gps = kv;
             } else if (source === "SYS" && kind === "LEVEL") {
-                // EVT,SYS,LEVEL,id=N,full=0|1,raw=0|1 — from the
-                // periodic LEVEL poller, drives the per-tank live pill.
+                // EVT,SYS,LEVEL,id=N,full=0|1,raw=0|1 — N is the PHYSICAL
+                // channel that was polled. Map it back to whichever
+                // logical tank is configured on that channel so the
+                // right card's wet/dry pill updates. (Fallback to
+                // identity when the config isn't loaded yet.)
                 const kv = {};
                 details.split(",").forEach(p => {
                     const i = p.indexOf("="); if (i > 0) kv[p.slice(0,i)] = p.slice(i+1);
                 });
-                const id = parseInt(kv.id, 10);
-                if (id >= 1 && id <= 3) {
-                    opState.tank_levels["C" + id] = {
+                const channel = parseInt(kv.id, 10);
+                let tankKey = null;
+                if (opConfig && opConfig.tanks) {
+                    for (const tid of ["C1", "C2", "C3"]) {
+                        const t = opConfig.tanks[tid];
+                        if (t && t.enabled && t.channel === channel) {
+                            tankKey = tid;
+                            break;
+                        }
+                    }
+                }
+                if (!tankKey && channel >= 1 && channel <= 3) {
+                    tankKey = "C" + channel;   // fallback
+                }
+                if (tankKey) {
+                    opState.tank_levels[tankKey] = {
                         full: kv.full === "1",
                         raw:  kv.raw === "1",
                     };
