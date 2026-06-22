@@ -930,12 +930,13 @@ void MissionControl::start_winch_rewind(uint8_t idx) {
     const TankConfig& tc = config_.tanks[idx];
     // Drive in the OPPOSITE direction of unroll.
     servo_bus_->write_pwm(tc.servo_id, static_cast<int16_t>(-tc.winch_pwm));
-    winch_active_[idx]      = true;
-    winch_jog_[idx]         = false;
-    winch_direction_[idx]   = -1;
-    winch_safety_stop_[idx] = clock_.now_ms() + tc.winch_roll_ms;
-    winch_last_raw_[idx]    = -1;          // first poll will seed
-    winch_last_poll_ms_[idx] = 0;
+    winch_active_[idx]          = true;
+    winch_jog_[idx]             = false;
+    winch_direction_[idx]       = -1;
+    winch_safety_stop_[idx]     = clock_.now_ms() + tc.winch_roll_ms;
+    winch_rewind_start_cum_[idx] = winch_cumulative_[idx];  // snapshot for delta
+    winch_last_raw_[idx]        = -1;          // first poll will seed
+    winch_last_poll_ms_[idx]    = 0;
 }
 
 // CMD,JOG_C{n}_{UP,DOWN} — manual one-shot jog used to position the
@@ -1027,10 +1028,21 @@ void MissionControl::service_winches() {
             if (safety_hit) should_stop = true;
         } else {
             // Rewind: stop on cumulative-back-to-home or safety cap.
-            const int32_t cum = winch_cumulative_[i];
-            const int32_t mag = cum < 0 ? -cum : cum;
-            if (mag <= HOME_TOLERANCE) should_stop = true;
-            else if (safety_hit)        should_stop = true;
+            //
+            // We REQUIRE real encoder motion this rewind before trusting
+            // the "back at home" check. Without this, if ReadPos failed
+            // during DESCENDING (cumulative stayed at 0), then at
+            // rewind start cumulative = 0 = "already home" and we'd
+            // stop the motor immediately. The fallback when the encoder
+            // isn't updating is the winch_roll_ms safety cap — slow
+            // but at least the line actually rewinds.
+            const int32_t cum     = winch_cumulative_[i];
+            const int32_t mag     = cum < 0 ? -cum : cum;
+            const int32_t d       = cum - winch_rewind_start_cum_[i];
+            const int32_t d_mag   = d < 0 ? -d : d;
+            const bool real_motion = d_mag >= 2 * HOME_TOLERANCE;
+            if (real_motion && mag <= HOME_TOLERANCE) should_stop = true;
+            else if (safety_hit)                       should_stop = true;
         }
 
         if (should_stop) {

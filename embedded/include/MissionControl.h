@@ -222,6 +222,7 @@ private:
     uint32_t winch_safety_stop_[3]     = {0, 0, 0};
     int32_t  winch_cumulative_[3]      = {0, 0, 0};
     int32_t  winch_jog_start_cum_[3]   = {0, 0, 0};  // cumulative snapshot at jog start
+    int32_t  winch_rewind_start_cum_[3] = {0, 0, 0}; // cumulative snapshot at rewind start
     int16_t  winch_last_raw_[3]        = {-1, -1, -1};
     uint32_t winch_last_poll_ms_[3]    = {0, 0, 0};
 
