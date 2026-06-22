@@ -30,6 +30,12 @@ public:
     // SC-09 bus UART pins on the production board. Anomalous vs. the
     // ESP32-S3 datasheet defaults — TX/RX are swapped. Do NOT change
     // without re-reading docs/hardware/servo_uart_pinout.md.
+    //
+    // Confirmed empirically (2026-06-22):
+    //   pin 44 = bus TX direction (writes here move the motor)
+    //   pin 43 = bus RX direction (TX echo arrives here)
+    // Both directions verified by attempting the swap — motor stopped
+    // moving, confirming pin 44 is the only writable path to the bus.
     static constexpr int TX_PIN = 44;
     static constexpr int RX_PIN = 43;
 
