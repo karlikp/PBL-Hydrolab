@@ -253,6 +253,11 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
         const size_t args_len = static_cast<size_t>(end - args);
         cmd_servo_return_delay(verb, args, args_len);
     }
+    else if (matches("SERVO_POSITION_MODE")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_servo_position_mode(verb, args, args_len);
+    }
     else if (matches("PUMP")) {
         const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
         const size_t args_len = static_cast<size_t>(end - args);
@@ -449,6 +454,31 @@ void MissionControl::cmd_servo_ping(const char* verb, const char* args, size_t a
     const int reply = servo_bus_->ping(static_cast<uint8_t>(id));
     char ev[64];
     snprintf(ev, sizeof(ev), "EVT,SYS,SERVO_PING,id=%d,reply=%d", id, reply);
+    send_payload(ev);
+    emit_ack(verb);
+}
+
+// CMD,SERVO_POSITION_MODE,<id> — flip the servo OUT of wheel/PWM mode
+// by writing the angle limits back to 0..1023 (EEPROM regs 9–12).
+// Persistent. The hypothesis: SC-09 wheel mode disables status replies
+// on this firmware. If SERVO_RAW returns 12 bytes after running this,
+// the mode-vs-reply interaction is confirmed and the trade-off becomes
+// "position-feedback OR multi-rev unwind, pick one."
+//
+// Note: after this, write_pwm calls won't move the motor — the servo
+// will be in position-control mode expecting goal positions (0..1023).
+// To go back to wheel mode, apply_config will call set_pwm_mode again
+// on the next provisioning cycle.
+void MissionControl::cmd_servo_position_mode(const char* verb, const char* args, size_t args_len) {
+    if (!servo_bus_) { emit_nack(verb, "no_servo_bus"); return; }
+    char buf[16] = {0};
+    if (args_len == 0 || args_len >= sizeof(buf)) { emit_nack(verb, "bad_args"); return; }
+    memcpy(buf, args, args_len);
+    const int id = atoi(buf);
+    if (id < 1 || id > 253) { emit_nack(verb, "out_of_range"); return; }
+    servo_bus_->set_position_mode(static_cast<uint8_t>(id));
+    char ev[64];
+    snprintf(ev, sizeof(ev), "EVT,SYS,SERVO_POSITION_MODE,id=%d", id);
     send_payload(ev);
     emit_ack(verb);
 }
