@@ -50,10 +50,14 @@ enum class SystemMode : uint8_t {
 // EXPERIMENTAL — winch in PWM/wheel mode (multi-revolution unspool).
 // The SC-09 has a hard ~300° single-turn range in position mode, which
 // isn't enough line for some rigs. PWM mode disables position control:
-// instead of "go to position X", we say "spin at PWM Y for T ms, then
-// coast." Calibration is by TIME, not position.
-//   winch_unroll_ms : drive duration when DESCENDING
-//   winch_roll_ms   : drive duration when ASCENDING / homing
+// instead of "go to position X", we drive a continuous-rotation duty
+// for the unroll, and use ENCODER WRAP COUNTING during the rewind to
+// land exactly back at home regardless of any unroll/rewind speed
+// asymmetry.
+//   winch_unroll_ms : drive duration on DESCENDING (time-based)
+//   winch_roll_ms   : safety cap on the rewind (cumulative-position
+//                     based stop is the primary; this just guards
+//                     against ReadPos failure)
 //   winch_pwm       : signed duty (-1023..1023). Sign = which direction
 //                     counts as "unroll" (lets the user flip without
 //                     reorienting the spool). Magnitude = motor speed.
@@ -62,7 +66,7 @@ struct TankConfig {
     uint8_t  channel  = 1;        // 1..3 — the fixed PUMP+TOPCN pair
     uint8_t  servo_id = 1;        // SC-09 bus address of this tank's winch
     uint16_t winch_unroll_ms = 4000;
-    uint16_t winch_roll_ms   = 4000;
+    uint16_t winch_roll_ms   = 12000;  // safety cap; rewind usually < this
     int16_t  winch_pwm       = 600;
 };
 
@@ -199,10 +203,25 @@ private:
     WinchH*         winch_ = nullptr;
     ConvergenceDetector conv_;  // conductivity stability during IN_WATER
 
-    // Per-tank winch (PWM mode) timing state. winch_active_[i] = true
-    // while servo i is being driven; tick() stops it at winch_stop_at_ms_.
-    uint32_t winch_stop_at_ms_[3] = {0, 0, 0};
-    bool     winch_active_[3]     = {false, false, false};
+    // Per-tank winch (PWM mode) state. Cumulative-position tracking
+    // lets rewind land exactly at home regardless of unroll/roll speed
+    // asymmetry: poll present-position at 20 Hz, detect wraps, and stop
+    // the rewind PWM when the accumulator returns to ~0. winch_roll_ms
+    // is the safety cap that fires if ReadPos is unreliable.
+    //   winch_active_       : motor is being driven on this tank
+    //   winch_direction_    : +1 unroll, -1 rewind, 0 idle
+    //   winch_safety_stop_  : hard PWM-off deadline (ms)
+    //   winch_cumulative_   : signed encoder counts from home (wraps
+    //                         accumulated; can exceed ±1023 across turns)
+    //   winch_last_raw_     : last validated present-position 0..1023
+    //                         (-1 = no successful poll yet this run)
+    //   winch_last_poll_ms_ : rate-limits the ReadPos polls
+    bool     winch_active_[3]          = {false, false, false};
+    int8_t   winch_direction_[3]       = {0, 0, 0};
+    uint32_t winch_safety_stop_[3]     = {0, 0, 0};
+    int32_t  winch_cumulative_[3]      = {0, 0, 0};
+    int16_t  winch_last_raw_[3]        = {-1, -1, -1};
+    uint32_t winch_last_poll_ms_[3]    = {0, 0, 0};
 
     // Command handlers
     void cmd_start_tank(uint8_t idx, const char* verb);
@@ -263,19 +282,31 @@ private:
     // and schedule a stop after winch_unroll_ms / winch_roll_ms.
     void drive_servo_for_step(const Sampler& tank);
 
-    // Start a winch PWM run for tank `idx`, signed direction `sign`
-    // (+1 unroll, -1 roll). Reads pwm/duration from the TankConfig.
-    // Also used by RESET (which homes the winch by running roll).
-    void start_winch(uint8_t idx, int8_t sign);
+    // Start an unroll run on tank `idx`: PWM forward at the configured
+    // signed duty, time-based stop at winch_unroll_ms. Cumulative
+    // position is tracked throughout so the matching rewind knows how
+    // far to come back.
+    void start_winch_unroll(uint8_t idx);
 
-    // Service the per-tank winch-active timers — stop PWM once
-    // winch_stop_at_ms_[i] has elapsed. Called from tick().
+    // Start a rewind run on tank `idx`: PWM in the OPPOSITE direction
+    // of unroll. Stops when cumulative_pos returns to ~0 (precise undo,
+    // independent of any unroll/rewind speed asymmetry) OR when the
+    // winch_roll_ms safety cap fires (in case the encoder polls fail).
+    void start_winch_rewind(uint8_t idx);
+
+    // Service the per-tank winch state — poll present-position at the
+    // configured rate (updates cumulative), and apply per-direction
+    // stop conditions. Called every tick().
     void service_winches();
 
-    // Halt the tank's winch immediately: write PWM=0, clear winch_active_.
-    // Used by STOP. Note: PWM=0 coasts — no holding torque. If the spool
-    // tends to gravity-unroll under load, switch back to position mode
-    // here and write present-position to lock.
+    // Update winch_cumulative_ from a fresh present-position read.
+    // Handles wraps and rejects glitched readings.
+    void poll_winch_position(uint8_t idx);
+
+    // Halt the tank's winch immediately: PWM=0, clear winch_active_.
+    // Used by STOP. PWM=0 coasts — no holding torque. The cumulative
+    // accumulator is preserved so a subsequent RESET can still rewind
+    // to home from wherever the motor coasted to.
     void stop_tank_winch(uint8_t idx);
 
     // Drive the tank's pump on PUMPING entry, off on any other step.
