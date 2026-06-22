@@ -233,6 +233,11 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
         const size_t args_len = static_cast<size_t>(end - args);
         cmd_servo_ping(verb, args, args_len);
     }
+    else if (matches("SERVO_POS")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_servo_pos(verb, args, args_len);
+    }
     else if (matches("PUMP")) {
         const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
         const size_t args_len = static_cast<size_t>(end - args);
@@ -429,6 +434,26 @@ void MissionControl::cmd_servo_ping(const char* verb, const char* args, size_t a
     const int reply = servo_bus_->ping(static_cast<uint8_t>(id));
     char ev[64];
     snprintf(ev, sizeof(ev), "EVT,SYS,SERVO_PING,id=%d,reply=%d", id, reply);
+    send_payload(ev);
+    emit_ack(verb);
+}
+
+// CMD,SERVO_POS,<id> — empirical readback test. Returns the present
+// position (0..1023) or -1 if the half-duplex bus echo confuses the
+// read. Used to verify whether ReadPos works reliably in PWM/wheel
+// mode (sample it before/after a JOG; if the value changes
+// consistently with motion, position-based control is viable).
+void MissionControl::cmd_servo_pos(const char* verb, const char* args, size_t args_len) {
+    if (!servo_bus_) { emit_nack(verb, "no_servo_bus"); return; }
+    char buf[16] = {0};
+    if (args_len == 0 || args_len >= sizeof(buf)) { emit_nack(verb, "bad_args"); return; }
+    memcpy(buf, args, args_len);
+    const int id = atoi(buf);
+    if (id < 1 || id > 253) { emit_nack(verb, "out_of_range"); return; }
+
+    const int pos = servo_bus_->read_position(static_cast<uint8_t>(id));
+    char ev[64];
+    snprintf(ev, sizeof(ev), "EVT,SYS,SERVO_POS,id=%d,pos=%d", id, pos);
     send_payload(ev);
     emit_ack(verb);
 }

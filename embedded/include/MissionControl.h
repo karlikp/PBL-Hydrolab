@@ -223,6 +223,7 @@ private:
     void cmd_servo_set_id(const char* verb, const char* args, size_t args_len);
     void cmd_servo_bcast_set_id(const char* verb, const char* args, size_t args_len);
     void cmd_servo_ping(const char* verb, const char* args, size_t args_len);
+    void cmd_servo_pos(const char* verb, const char* args, size_t args_len);
     void cmd_pump(const char* verb, const char* args, size_t args_len);
     void cmd_level(const char* verb, const char* args, size_t args_len);
     void cmd_level_diag(const char* verb, const char* args, size_t args_len);
