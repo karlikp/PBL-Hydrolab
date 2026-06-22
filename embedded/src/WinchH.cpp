@@ -16,6 +16,17 @@ void WinchH::begin() {
     ledcWrite(PWM_CHANNEL, 0);
 }
 
+void WinchH::brake() {
+    // Both enables HIGH = motor terminals tied together through the
+    // bridge. Back-EMF dissipates through the shorted coils whenever
+    // the shaft is forced to rotate, providing passive holding torque.
+    // PWM is set to 0 (some H-bridge ICs use PWM=0 + both ENs HIGH for
+    // "brake to ground"; others ignore PWM in this state — 0 is safe).
+    digitalWrite(en_l_, HIGH);
+    digitalWrite(en_r_, HIGH);
+    ledcWrite(PWM_CHANNEL, 0);
+}
+
 void WinchH::drive(Direction dir, uint8_t duty_pct) {
     if (duty_pct > 100) duty_pct = 100;
     const uint32_t max_duty = (1u << PWM_RES_BITS) - 1;

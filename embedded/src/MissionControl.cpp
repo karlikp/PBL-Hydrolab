@@ -1213,23 +1213,17 @@ void MissionControl::drive_elmetron_winch_for_step() {
             break;
         case ElmetronStep::IN_WATER:
         case ElmetronStep::HOME:
-        case ElmetronStep::NONE: {
-            // Apply a small UP-direction PWM to hold the probe against
-            // gravity. Without this, stop() puts the H-bridge in coast
-            // (both halves tristate, motor floats) and the cable
-            // gravity-unspools while we're sitting in IN_WATER.
-            //   IN_WATER : probe must stay at depth for the duration
-            //              of the convergence/measure window.
-            //   HOME     : brief settle dwell — limit switch holds it
-            //              mechanically, but applying hold doesn't hurt.
-            //   NONE     : idle after a cycle (or after STOP_ELMETRON
-            //              mid-cycle). Probe could be at any depth.
-            // Tune up if the load still drifts, down if the motor
-            // actually rotates upward at this duty.
-            constexpr uint8_t HOLD_DUTY_PCT = 20;
-            winch_->drive(WinchH::Direction::UP, HOLD_DUTY_PCT);
+        case ElmetronStep::NONE:
+            // Brake mode: both H-bridge halves HIGH, motor terminals
+            // shorted. Passively resists any rotation via back-EMF
+            // dissipation — holds against gravity without active
+            // current draw, and (unlike counter-PWM) doesn't drift
+            // either way under no load.
+            //   IN_WATER : probe stays at depth for the measure window.
+            //   HOME     : brief settle dwell; brake doesn't hurt.
+            //   NONE     : idle after a cycle (or STOP_ELMETRON mid-cycle).
+            winch_->brake();
             break;
-        }
     }
 }
 

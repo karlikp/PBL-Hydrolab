@@ -33,6 +33,20 @@ public:
     void drive(Direction dir, uint8_t duty_pct);
     void stop() { drive(Direction::STOP, 0); }
 
+    // Dynamic brake: both H-bridge halves HIGH, motor terminals
+    // shorted through the bridge. Back-EMF from any attempted rotation
+    // is dissipated through the shorted coils → passive opposing
+    // torque. Zero current when stationary; only draws current while
+    // actively braking against motion. Use for "hold against gravity"
+    // without the no-load drift of a continuous counter-PWM.
+    //
+    // Assumes the off-board H-bridge IC has internal shoot-through
+    // prevention (common in L298, DRV8871, BTS7960, etc.). If the
+    // module is a discrete-FET bridge without protection, both ENs
+    // HIGH could short VCC to GND — verify the IC before relying on
+    // this.
+    void brake();
+
     // True when the home limit switch is engaged (cable fully retracted).
     bool at_home() const;
     int  raw_limit() const;   // diagnostic: unfiltered digitalRead
