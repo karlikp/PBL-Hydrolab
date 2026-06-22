@@ -150,6 +150,16 @@ public:
     //   2 = reply on all instructions (what we want for diagnostics)
     bool set_status_return_level(uint8_t id, uint8_t level);
 
+    // Write `value` to the Return Delay register (EEPROM reg 7 on
+    // Feetech SCS-family). Encoding is value × 2 µs of delay before
+    // the servo starts transmitting its reply. Used to push the reply
+    // latency far enough out that the board's auto-direction BJT has
+    // settled into RX mode before the first reply byte arrives.
+    //   value 0   → ~0 µs (servo replies immediately — default, problematic)
+    //   value 125 → ~250 µs
+    //   value 250 → ~500 µs (safe margin for any TX→RX switching delay)
+    bool set_return_delay(uint8_t id, uint8_t value);
+
 private:
     struct Impl;
     Impl* impl_;

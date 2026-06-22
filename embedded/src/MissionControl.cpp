@@ -248,6 +248,11 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
         const size_t args_len = static_cast<size_t>(end - args);
         cmd_servo_reply_on(verb, args, args_len);
     }
+    else if (matches("SERVO_RETURN_DELAY")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_servo_return_delay(verb, args, args_len);
+    }
     else if (matches("PUMP")) {
         const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
         const size_t args_len = static_cast<size_t>(end - args);
@@ -444,6 +449,31 @@ void MissionControl::cmd_servo_ping(const char* verb, const char* args, size_t a
     const int reply = servo_bus_->ping(static_cast<uint8_t>(id));
     char ev[64];
     snprintf(ev, sizeof(ev), "EVT,SYS,SERVO_PING,id=%d,reply=%d", id, reply);
+    send_payload(ev);
+    emit_ack(verb);
+}
+
+// CMD,SERVO_RETURN_DELAY,<id>,<value> — write to the Return Delay
+// register (EEPROM reg 7). Encoding is value × 2 µs. Used to push the
+// servo's reply latency further out, so the board's auto-direction BJT
+// has time to flip from TX→RX before the first reply byte lands.
+// Sensible values to try: 125 (~250µs), 250 (~500µs), 254 (~508µs max).
+void MissionControl::cmd_servo_return_delay(const char* verb, const char* args, size_t args_len) {
+    if (!servo_bus_) { emit_nack(verb, "no_servo_bus"); return; }
+    char buf[32] = {0};
+    if (args_len == 0 || args_len >= sizeof(buf)) { emit_nack(verb, "bad_args"); return; }
+    memcpy(buf, args, args_len);
+    char* comma = strchr(buf, ',');
+    if (!comma) { emit_nack(verb, "bad_args"); return; }
+    *comma = '\0';
+    const int id = atoi(buf);
+    const int val = atoi(comma + 1);
+    if (id < 1 || id > 253)   { emit_nack(verb, "out_of_range"); return; }
+    if (val < 0 || val > 254) { emit_nack(verb, "out_of_range"); return; }
+    servo_bus_->set_return_delay(static_cast<uint8_t>(id), static_cast<uint8_t>(val));
+    char ev[80];
+    snprintf(ev, sizeof(ev), "EVT,SYS,SERVO_RETURN_DELAY,id=%d,value=%d,approx_us=%d",
+             id, val, val * 2);
     send_payload(ev);
     emit_ack(verb);
 }

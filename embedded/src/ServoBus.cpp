@@ -231,6 +231,18 @@ bool ServoBus::set_status_return_level(uint8_t id, uint8_t level) {
     return true;
 }
 
+bool ServoBus::set_return_delay(uint8_t id, uint8_t value) {
+    // Register 7 is Return Delay on Feetech SCS-family servos. EEPROM.
+    SCSCL& sc = impl_->sc;
+    sc.unLockEprom(id);
+    delay(EEPROM_COMMIT_MS);
+    sc.writeByte(id, /*reg=*/7, value);
+    delay(EEPROM_COMMIT_MS);
+    sc.LockEprom(id);
+    delay(EEPROM_COMMIT_MS);
+    return true;
+}
+
 bool ServoBus::broadcast_set_id(uint8_t new_id) {
     SCSCL& sc = impl_->sc;
     sc.unLockEprom(BROADCAST_ID);
