@@ -41,20 +41,26 @@ DEFAULTS = {
     "global": {
         "pumping_timeout_s": 90,  # hard cap on the PUMPING step
     },
+    # EXPERIMENTAL — winches drive in PWM/wheel mode (multi-revolution
+    # unspool). Tuning is by TIME, not position:
+    #   winch_unroll_ms : drive duration when DESCENDING (motor spin)
+    #   winch_roll_ms   : drive duration when ASCENDING / homing
+    #   winch_pwm       : signed duty -1023..1023; sign sets which
+    #                     direction is "unroll" (flip without rewiring)
     "tanks": {
-        "C1": {"enabled": True, "channel": 1, "servo_id": 1, "servo_home": 0, "servo_unrolled": 1000},
-        "C2": {"enabled": True, "channel": 2, "servo_id": 2, "servo_home": 0, "servo_unrolled": 1000},
-        "C3": {"enabled": True, "channel": 3, "servo_id": 3, "servo_home": 0, "servo_unrolled": 1000},
+        "C1": {"enabled": True,  "channel": 1, "servo_id": 1, "winch_unroll_ms": 4000, "winch_roll_ms": 4000, "winch_pwm":  600},
+        "C2": {"enabled": True,  "channel": 2, "servo_id": 3, "winch_unroll_ms": 4000, "winch_roll_ms": 4000, "winch_pwm": -600},
+        "C3": {"enabled": False, "channel": 3, "servo_id": 3, "winch_unroll_ms": 4000, "winch_roll_ms": 4000, "winch_pwm":  600},
     },
     # Elmetron tuning — provisioned via CMD,CFG_ELE. Defaults match the
     # firmware module defaults. Timeouts in seconds.
     "elmetron": {
-        "water_threshold_ms": 0.7,    # descent trigger (cond mS/cm)
-        "winch_duty_pct": 60,         # drive speed
-        "descent_timeout_s": 4,       # safety cap (firmware ceiling 30)
+        "water_threshold_ms": 0.35,    # descent trigger (cond mS/cm)
+        "winch_duty_pct": 65,         # drive speed
+        "descent_timeout_s": 5,       # safety cap (firmware ceiling 30)
         "ascent_timeout_s": 5,
-        "homing_timeout_s": 4,
-        "measure_timeout_s": 90,      # strict measurement cap
+        "homing_timeout_s": 5,
+        "measure_timeout_s": 60,      # strict measurement cap
         "convergence_window_s": 10,
         "convergence_tol_pct": 5,
         "winch_dir_invert": False,    # flip if winch goes the wrong way
@@ -62,7 +68,8 @@ DEFAULTS = {
     },
 }
 
-TANK_FIELDS = ("enabled", "channel", "servo_id", "servo_home", "servo_unrolled")
+TANK_FIELDS = ("enabled", "channel", "servo_id",
+               "winch_unroll_ms", "winch_roll_ms", "winch_pwm")
 ELE_FIELDS = (
     "water_threshold_ms", "winch_duty_pct", "descent_timeout_s",
     "ascent_timeout_s", "homing_timeout_s", "measure_timeout_s",
@@ -148,10 +155,13 @@ def validate_config(cfg: dict) -> list[str]:
             errors.append(f"{tid}.channel must be one of {VALID_CHANNELS}")
         if not isinstance(sv, int) or not (1 <= sv <= 253):
             errors.append(f"{tid}.servo_id must be an integer 1..253")
-        for pos in ("servo_home", "servo_unrolled"):
-            p = t.get(pos)
-            if not isinstance(p, int) or not (0 <= p <= 1023):
-                errors.append(f"{tid}.{pos} must be an integer 0..1023")
+        for ms_key in ("winch_unroll_ms", "winch_roll_ms"):
+            v = t.get(ms_key)
+            if not isinstance(v, int) or not (0 <= v <= 30000):
+                errors.append(f"{tid}.{ms_key} must be an integer 0..30000 ms")
+        pwm = t.get("winch_pwm")
+        if not isinstance(pwm, int) or not (-1023 <= pwm <= 1023):
+            errors.append(f"{tid}.winch_pwm must be a signed integer -1023..1023")
         # Collisions only matter among ENABLED tanks — two disabled tanks
         # can nominally share a channel without consequence.
         if t.get("enabled"):

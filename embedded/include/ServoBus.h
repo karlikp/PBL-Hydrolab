@@ -46,6 +46,27 @@ public:
     // Best-effort — broadcast writes don't get a reply.
     bool move(uint8_t id, uint16_t position, uint16_t speed = 1500);
 
+    // ---- Wheel / PWM mode ----
+    //
+    // The SC-09 has a hard ~300° single-turn range in position mode. For
+    // applications that need multiple revolutions (winches that unspool
+    // line longer than one rotation can pull), the servo can be switched
+    // into PWM/wheel mode: the position-control loop is disabled and the
+    // motor spins continuously, driven by a signed duty-cycle value.
+    //
+    // set_pwm_mode writes 0/0 into the EEPROM angle-limit registers,
+    // which disables the angle limiter and turns the servo into a
+    // continuous-rotation drive. NOTE: this is an EEPROM write — it
+    // persists across power cycles. To revert, call set_position_mode.
+    //
+    // write_pwm drives the motor: pwm > 0 spins one direction, pwm < 0
+    // spins the other, pwm == 0 coasts (no holding torque). Magnitude
+    // 0..1023 controls duty.
+    bool set_pwm_mode(uint8_t id);
+    bool set_position_mode(uint8_t id);  // revert: angle limits 0..1023
+    bool write_pwm(uint8_t id, int16_t pwm);
+    bool stop_pwm(uint8_t id) { return write_pwm(id, 0); }
+
     // Read the servo's current present position (register
     // SCSCL_PRESENT_POSITION). Returns 0..1023 on success, -1 on
     // failure / timeout / no servo at this ID.

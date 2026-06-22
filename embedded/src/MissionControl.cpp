@@ -73,8 +73,25 @@ bool MissionControl::tank_full(uint8_t tank_id) {
 }
 
 void MissionControl::apply_config() {
+    // Grace period after the winch should be done before the Sampler
+    // transitions out of DESCENDING/ASCENDING — covers timing jitter
+    // and lets the PWM=0 coast settle.
+    constexpr uint32_t WINCH_GRACE_MS = 500;
     for (uint8_t i = 0; i < 3; ++i) {
         tanks_[i].set_pumping_timeout_ms(config_.pumping_timeout_ms);
+        tanks_[i].set_descending_ms(config_.tanks[i].winch_unroll_ms + WINCH_GRACE_MS);
+        tanks_[i].set_ascending_ms (config_.tanks[i].winch_roll_ms   + WINCH_GRACE_MS);
+    }
+    // Put each ENABLED tank's servo into PWM/wheel mode. Writes
+    // EEPROM angle limits to 0/0; persists across power cycles, so
+    // this is idempotent on subsequent boots. No-op if the servo bus
+    // isn't attached yet (set_servo_bus re-runs apply_config).
+    if (servo_bus_) {
+        for (uint8_t i = 0; i < 3; ++i) {
+            if (config_.tanks[i].enabled) {
+                servo_bus_->set_pwm_mode(config_.tanks[i].servo_id);
+            }
+        }
     }
 }
 
@@ -84,6 +101,7 @@ void MissionControl::boot(const char* version) {
 
 void MissionControl::tick() {
     for (auto& t : tanks_) t.tick();
+    service_winches();
 
     for (size_t i = 0; i < 3; ++i) {
         auto& t = tanks_[i];
@@ -481,11 +499,11 @@ void MissionControl::cmd_stop_tank(uint8_t idx, const char* verb) {
         emit_nack(verb, "not_running");
         return;
     }
-    // Freeze the servo BEFORE the FSM transitions out of SAMPLING.
-    // The SC-09 is position-controlled — without this it would
-    // finish tracking to whatever DESCENDING/ASCENDING endpoint was
-    // last commanded, not "stay where it is" as the operator expects.
-    freeze_tank_servo(config_.tanks[idx].servo_id);
+    // Halt the winch immediately (PWM=0 → motor coasts). With the
+    // SC-09 in wheel mode there's no holding torque on stop — if
+    // bench-test shows the spool gravity-unrolls under load, this
+    // is where we'd flip back into position mode and lock present-pos.
+    stop_tank_winch(idx);
     t.abort();
     emit_ack(verb);
 }
@@ -535,14 +553,12 @@ void MissionControl::cmd_reset_tank(uint8_t idx, const char* verb) {
     }
     emit_ack(verb);
 
-    // Return the tank's winch to its init (home) position. STOP froze
-    // the SC-09 at some mid-position; RESET clears the fault AND brings
-    // the cable back to a known start state so the next START_Cx begins
-    // from HOME, matching the operator-mental-model of "reset = back
-    // to ready." The SC-09 is closed-loop, so this is reliable.
-    if (servo_bus_) {
-        servo_bus_->move(config_.tanks[idx].servo_id, config_.tanks[idx].servo_home);
-    }
+    // Return the tank's winch to home by driving the roll direction
+    // for the full configured roll duration. STOP halted the winch
+    // at some mid-unspool; RESET runs it back so the next START_Cx
+    // begins from a known empty-spool position. In wheel mode there's
+    // no closed-loop "go to home" — we just time it out.
+    start_winch(idx, -1);
 
     // If E-STOP latched and there are no fault tanks left, drop to IDLE.
     // The Elmetron is implicitly cleared at the same time — the
@@ -870,42 +886,54 @@ void MissionControl::cmd_level(const char* verb, const char* args, size_t args_l
 
 // Wire Sampler step transitions to the per-tank servo. Sampler IDs
 // 1/2/3 line up 1:1 with servo IDs 1/2/3 (the IDs we programmed via
-// CMD,SERVO_SET_ID). Only DESCENDING and ASCENDING steps actually
-// move the servo; the IN_WATER / PUMPING / HOME steps are pure mock
-// dwells while the rest of the mechanism (pump, end-stops) lands.
+// CMD,SERVO_SET_ID). DESCENDING starts an unroll-direction PWM run;
+// ASCENDING starts the opposite direction. IN_WATER/PUMPING/HOME are
+// pure dwells — the winch is already stopped by service_winches() by
+// the time the Sampler transitions out of DESCENDING.
 void MissionControl::drive_servo_for_step(const Sampler& tank) {
-    if (!servo_bus_) return;
-    const TankConfig& tc = config_.tanks[tank.id() - 1];
+    const uint8_t idx = tank.id() - 1;
     switch (tank.step()) {
-        case TankStep::DESCENDING:
-            servo_bus_->move(tc.servo_id, tc.servo_unrolled);
-            break;
-        case TankStep::ASCENDING:
-            servo_bus_->move(tc.servo_id, tc.servo_home);
-            break;
+        case TankStep::DESCENDING: start_winch(idx, +1); break;
+        case TankStep::ASCENDING:  start_winch(idx, -1); break;
         case TankStep::IN_WATER:
         case TankStep::PUMPING:
         case TankStep::HOME:
         case TankStep::NONE:
-            break;  // no servo motion at these steps
+            break;  // no winch motion at these steps
     }
 }
 
-// Read the SC-09's current present position and command it back to
-// that same value — the servo stops tracking to its old goal and
-// holds where it physically is. Used by STOP_Cx to make abort
-// behave the way the operator expects (cable stays where it was at
-// the moment of stop, not "finishes whatever motion was queued").
-//
-// Falls back gracefully if the half-duplex bus read returns -1 or
-// an obviously-bad value: do nothing, and the servo continues to
-// its previous goal — i.e. behaviour is no worse than before the
-// freeze logic existed.
-void MissionControl::freeze_tank_servo(uint8_t servo_id) {
+// Begin a PWM run on tank `idx`'s winch. `sign` is +1 for unroll,
+// -1 for roll-back; multiplied into the configured signed pwm so the
+// user can flip "which direction is unroll" via the config sign bit
+// without rewiring the spool. No-op if the bus isn't attached.
+void MissionControl::start_winch(uint8_t idx, int8_t sign) {
+    if (!servo_bus_ || idx >= 3) return;
+    const TankConfig& tc = config_.tanks[idx];
+    const int16_t pwm = static_cast<int16_t>(sign) * tc.winch_pwm;
+    const uint16_t duration = (sign > 0) ? tc.winch_unroll_ms : tc.winch_roll_ms;
+    servo_bus_->write_pwm(tc.servo_id, pwm);
+    winch_active_[idx]     = true;
+    winch_stop_at_ms_[idx] = clock_.now_ms() + duration;
+}
+
+// Per-tick: stop any winch whose duration has elapsed.
+void MissionControl::service_winches() {
     if (!servo_bus_) return;
-    const int pos = servo_bus_->read_position(servo_id);
-    if (pos < 0 || pos > 1023) return;
-    servo_bus_->move(servo_id, static_cast<uint16_t>(pos));
+    const uint32_t now = clock_.now_ms();
+    for (uint8_t i = 0; i < 3; ++i) {
+        if (winch_active_[i] && (int32_t)(now - winch_stop_at_ms_[i]) >= 0) {
+            servo_bus_->stop_pwm(config_.tanks[i].servo_id);
+            winch_active_[i] = false;
+        }
+    }
+}
+
+// Halt this tank's winch immediately (PWM=0 = coast). Used by STOP.
+void MissionControl::stop_tank_winch(uint8_t idx) {
+    if (!servo_bus_ || idx >= 3) return;
+    servo_bus_->stop_pwm(config_.tanks[idx].servo_id);
+    winch_active_[idx] = false;
 }
 
 // Drive the pump for `tank` based on its current step. Pump on
@@ -1149,23 +1177,27 @@ void MissionControl::cmd_cfg(const char* verb, const char* args, size_t args_len
         } else if (tok[0] == 'C' && tok[1] >= '1' && tok[1] <= '3'
                    && tok[2] == '=') {
             const int idx = tok[1] - '1';
-            // Cx = enabled:channel:servo[:home:unrolled]. Home/unrolled
-            // are optional (older 3-field form keeps current values).
-            int en = 0, ch = 0, sv = 0, hm = -1, un = -1;
-            const int got = sscanf(tok + 3, "%d:%d:%d:%d:%d",
-                                   &en, &ch, &sv, &hm, &un);
+            // Cx = enabled:channel:servo[:unroll_ms:roll_ms:pwm]. The
+            // winch fields are optional (older 3-field form keeps the
+            // current values, so legacy provisioners still parse). PWM
+            // is SIGNED — sign sets the unroll direction.
+            int en = 0, ch = 0, sv = 0, ups = -1, rls = -1, pw = -9999;
+            const int got = sscanf(tok + 3, "%d:%d:%d:%d:%d:%d",
+                                   &en, &ch, &sv, &ups, &rls, &pw);
             if (got < 3) { emit_nack(verb, "bad_args"); return; }
             if (ch < 1 || ch > 3 || sv < 1 || sv > 253) {
                 emit_nack(verb, "out_of_range");
                 return;
             }
-            if (got >= 4 && (hm < 0 || hm > 1023)) { emit_nack(verb, "bad_servo_pos"); return; }
-            if (got >= 5 && (un < 0 || un > 1023)) { emit_nack(verb, "bad_servo_pos"); return; }
+            if (got >= 4 && (ups < 0 || ups > 30000))      { emit_nack(verb, "bad_winch_ms"); return; }
+            if (got >= 5 && (rls < 0 || rls > 30000))      { emit_nack(verb, "bad_winch_ms"); return; }
+            if (got >= 6 && (pw < -1023 || pw > 1023))     { emit_nack(verb, "bad_winch_pwm"); return; }
             tmp.tanks[idx].enabled  = (en != 0);
             tmp.tanks[idx].channel  = static_cast<uint8_t>(ch);
             tmp.tanks[idx].servo_id = static_cast<uint8_t>(sv);
-            if (got >= 4) tmp.tanks[idx].servo_home     = static_cast<uint16_t>(hm);
-            if (got >= 5) tmp.tanks[idx].servo_unrolled = static_cast<uint16_t>(un);
+            if (got >= 4) tmp.tanks[idx].winch_unroll_ms = static_cast<uint16_t>(ups);
+            if (got >= 5) tmp.tanks[idx].winch_roll_ms   = static_cast<uint16_t>(rls);
+            if (got >= 6) tmp.tanks[idx].winch_pwm       = static_cast<int16_t>(pw);
         }
         // Unknown tokens ignored (forward-compat per protocol §10).
     }
@@ -1263,21 +1295,21 @@ void MissionControl::emit_cfg_ele() {
     send_payload(buf);
 }
 
-// EVT,SYS,CFG,to=<sec>,C1=<en>:<ch>:<servo>,... — must match the exact
-// string the GCS builds when it provisions, so the readback compares
-// equal. Timeout reported in whole seconds.
+// EVT,SYS,CFG,to=<sec>,C1=<en>:<ch>:<servo>:<unroll_ms>:<roll_ms>:<pwm>,...
+// — must match the GCS-built string byte-for-byte for readback to
+// compare equal. Timeout reported in whole seconds.
 void MissionControl::emit_cfg() {
-    char buf[160];
+    char buf[200];
     snprintf(buf, sizeof(buf),
         "EVT,SYS,CFG,to=%lu,"
-        "C1=%d:%d:%d:%d:%d,C2=%d:%d:%d:%d:%d,C3=%d:%d:%d:%d:%d",
+        "C1=%d:%d:%d:%d:%d:%d,C2=%d:%d:%d:%d:%d:%d,C3=%d:%d:%d:%d:%d:%d",
         static_cast<unsigned long>(config_.pumping_timeout_ms / 1000u),
         config_.tanks[0].enabled ? 1 : 0, config_.tanks[0].channel, config_.tanks[0].servo_id,
-        config_.tanks[0].servo_home, config_.tanks[0].servo_unrolled,
+        config_.tanks[0].winch_unroll_ms, config_.tanks[0].winch_roll_ms, config_.tanks[0].winch_pwm,
         config_.tanks[1].enabled ? 1 : 0, config_.tanks[1].channel, config_.tanks[1].servo_id,
-        config_.tanks[1].servo_home, config_.tanks[1].servo_unrolled,
+        config_.tanks[1].winch_unroll_ms, config_.tanks[1].winch_roll_ms, config_.tanks[1].winch_pwm,
         config_.tanks[2].enabled ? 1 : 0, config_.tanks[2].channel, config_.tanks[2].servo_id,
-        config_.tanks[2].servo_home, config_.tanks[2].servo_unrolled);
+        config_.tanks[2].winch_unroll_ms, config_.tanks[2].winch_roll_ms, config_.tanks[2].winch_pwm);
     send_payload(buf);
 }
 

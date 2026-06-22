@@ -4,6 +4,11 @@
 #include <HardwareSerial.h>
 #include <SCServo.h>
 
+// Delay between EEPROM writes — servo's internal commit takes a few
+// ms; without this the next packet can arrive before the previous
+// write has landed. Used by set_id and the PWM/position-mode helpers.
+static constexpr uint32_t EEPROM_COMMIT_MS = 20;
+
 struct ServoBus::Impl {
     SCSCL sc;
 };
@@ -21,6 +26,36 @@ bool ServoBus::move(uint8_t id, uint16_t position, uint16_t speed) {
     // SCSCL::WritePos(id, position, time, speed) — we leave time = 0,
     // speed alone gives smooth enough motion.
     return impl_->sc.WritePos(id, position, /*time=*/0, speed) >= 0;
+}
+
+bool ServoBus::set_pwm_mode(uint8_t id) {
+    // Writes 0/0 into SCSCL_MIN/MAX_ANGLE_LIMIT — EEPROM write,
+    // persists across power cycles. PWMMode() is the lib's shorthand
+    // for the same write. Ack unreliable on half-duplex (see set_id).
+    impl_->sc.PWMMode(id);
+    delay(EEPROM_COMMIT_MS);
+    return true;
+}
+
+bool ServoBus::set_position_mode(uint8_t id) {
+    // Inverse of set_pwm_mode: restore full single-turn angle limits.
+    // Lib has no helper for this — go through generic byte writes.
+    // Registers 9..12 = MIN_L, MIN_H, MAX_L, MAX_H. MIN = 0, MAX = 1023.
+    impl_->sc.writeByte(id, SCSCL_MIN_ANGLE_LIMIT_L, 0);
+    impl_->sc.writeByte(id, SCSCL_MIN_ANGLE_LIMIT_H, 0);
+    impl_->sc.writeByte(id, SCSCL_MAX_ANGLE_LIMIT_L, 1023 & 0xFF);
+    impl_->sc.writeByte(id, SCSCL_MAX_ANGLE_LIMIT_H, (1023 >> 8) & 0xFF);
+    delay(EEPROM_COMMIT_MS);
+    return true;
+}
+
+bool ServoBus::write_pwm(uint8_t id, int16_t pwm) {
+    // Magnitude clipped to 1023 (10-bit duty); sign = direction. The
+    // lib repacks the sign into bit 10 of the wire word.
+    if (pwm >  1023) pwm =  1023;
+    if (pwm < -1023) pwm = -1023;
+    impl_->sc.WritePWM(id, pwm);
+    return true;  // half-duplex Ack unreliable; trust the write
 }
 
 int ServoBus::ping(uint8_t id) {
@@ -60,8 +95,6 @@ int ServoBus::read_position(uint8_t id) {
 // (A proper fix would drain the echo bytes in a custom Stream wrapper
 // before each Ack read, but that is invasive and orthogonal to the
 // immediate need.)
-
-static constexpr uint32_t EEPROM_COMMIT_MS = 20;
 
 bool ServoBus::set_id(uint8_t current_id, uint8_t new_id) {
     SCSCL& sc = impl_->sc;

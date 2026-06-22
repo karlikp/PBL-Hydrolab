@@ -197,11 +197,13 @@
                 <select class="t-channel">${chOpts}</select>
                 <label>Winch servo id</label>
                 <input type="number" class="t-servo" min="1" max="253" value="${t.servo_id}">
-                <label>Servo home / unrolled (0–1023)</label>
+                <label>Winch (PWM/wheel mode) — unroll / roll duration (ms), PWM duty</label>
                 <span>
-                    <input type="number" class="t-home" min="0" max="1023" value="${t.servo_home}" style="width:80px">
-                    →
-                    <input type="number" class="t-unrolled" min="0" max="1023" value="${t.servo_unrolled}" style="width:80px">
+                    <input type="number" class="t-upms" min="0" max="30000" value="${t.winch_unroll_ms}" style="width:80px" title="unroll duration (ms)">
+                    /
+                    <input type="number" class="t-rlms" min="0" max="30000" value="${t.winch_roll_ms}" style="width:80px" title="roll-back duration (ms)">
+                    @
+                    <input type="number" class="t-pwm"  min="-1023" max="1023" value="${t.winch_pwm}" style="width:80px" title="signed PWM duty (sign = unroll direction)">
                 </span>
             `;
             const cb = div.querySelector(".t-enabled");
@@ -241,8 +243,9 @@
                 enabled: div.querySelector(".t-enabled").checked,
                 channel: parseInt(div.querySelector(".t-channel").value, 10),
                 servo_id: parseInt(div.querySelector(".t-servo").value, 10),
-                servo_home: parseInt(div.querySelector(".t-home").value, 10),
-                servo_unrolled: parseInt(div.querySelector(".t-unrolled").value, 10),
+                winch_unroll_ms: parseInt(div.querySelector(".t-upms").value, 10),
+                winch_roll_ms:   parseInt(div.querySelector(".t-rlms").value, 10),
+                winch_pwm:       parseInt(div.querySelector(".t-pwm").value, 10),
             };
         });
         const ei = (id) => parseInt(document.getElementById(id).value, 10);

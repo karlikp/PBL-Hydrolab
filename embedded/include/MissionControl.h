@@ -46,12 +46,24 @@ enum class SystemMode : uint8_t {
 // plugged together differently can be remapped without reflashing.
 // Defaults match the historical 1:1 wiring (tank N → channel/servo N),
 // so an un-provisioned board behaves exactly as before.
+//
+// EXPERIMENTAL — winch in PWM/wheel mode (multi-revolution unspool).
+// The SC-09 has a hard ~300° single-turn range in position mode, which
+// isn't enough line for some rigs. PWM mode disables position control:
+// instead of "go to position X", we say "spin at PWM Y for T ms, then
+// coast." Calibration is by TIME, not position.
+//   winch_unroll_ms : drive duration when DESCENDING
+//   winch_roll_ms   : drive duration when ASCENDING / homing
+//   winch_pwm       : signed duty (-1023..1023). Sign = which direction
+//                     counts as "unroll" (lets the user flip without
+//                     reorienting the spool). Magnitude = motor speed.
 struct TankConfig {
     bool     enabled  = true;
-    uint8_t  channel  = 1;       // 1..3 — the fixed PUMP+TOPCN pair
-    uint8_t  servo_id = 1;       // SC-09 bus address of this tank's winch
-    uint16_t servo_home     = 0;    // SC-09 stowed/home position (0..1023)
-    uint16_t servo_unrolled = 1000; // SC-09 fully-deployed position
+    uint8_t  channel  = 1;        // 1..3 — the fixed PUMP+TOPCN pair
+    uint8_t  servo_id = 1;        // SC-09 bus address of this tank's winch
+    uint16_t winch_unroll_ms = 4000;
+    uint16_t winch_roll_ms   = 4000;
+    int16_t  winch_pwm       = 600;
 };
 
 struct SystemConfig {
@@ -105,7 +117,9 @@ public:
     void set_battery_monitor(BatteryMonitor* bm) { battery_ = bm; }
 
     // Optional: attach the servo bus so CMD,SERVO_MOVE,<id>,<pos> works.
-    void set_servo_bus(ServoBus* sb) { servo_bus_ = sb; }
+    // Re-applies the active config (sets PWM mode on every enabled
+    // tank's servo) since this is the first point at which we can.
+    void set_servo_bus(ServoBus* sb) { servo_bus_ = sb; apply_config(); }
 
     // Optional: attach the pump controller so the PUMPING step actually
     // turns a pump on, and CMD,PUMP,<id>,<state> works for bench tests.
@@ -185,6 +199,11 @@ private:
     WinchH*         winch_ = nullptr;
     ConvergenceDetector conv_;  // conductivity stability during IN_WATER
 
+    // Per-tank winch (PWM mode) timing state. winch_active_[i] = true
+    // while servo i is being driven; tick() stops it at winch_stop_at_ms_.
+    uint32_t winch_stop_at_ms_[3] = {0, 0, 0};
+    bool     winch_active_[3]     = {false, false, false};
+
     // Command handlers
     void cmd_start_tank(uint8_t idx, const char* verb);
     void cmd_start_elmetron(const char* verb);
@@ -240,15 +259,24 @@ private:
     void apply_config();
 
     // Drive the tank's servo on DESCENDING/ASCENDING step entries.
+    // In PWM/wheel mode: start the motor at the configured signed PWM
+    // and schedule a stop after winch_unroll_ms / winch_roll_ms.
     void drive_servo_for_step(const Sampler& tank);
 
-    // Freeze the servo at its current physical position. Reads
-    // present-position via the SC-09 bus and writes it back as the
-    // new goal, so the servo abandons whatever DESCENDING/ASCENDING
-    // endpoint it was tracking to and holds in place. No-op if the
-    // bus isn't attached or the read fails (the SC-09 will then keep
-    // tracking to its previous target — same as pre-STOP behaviour).
-    void freeze_tank_servo(uint8_t servo_id);
+    // Start a winch PWM run for tank `idx`, signed direction `sign`
+    // (+1 unroll, -1 roll). Reads pwm/duration from the TankConfig.
+    // Also used by RESET (which homes the winch by running roll).
+    void start_winch(uint8_t idx, int8_t sign);
+
+    // Service the per-tank winch-active timers — stop PWM once
+    // winch_stop_at_ms_[i] has elapsed. Called from tick().
+    void service_winches();
+
+    // Halt the tank's winch immediately: write PWM=0, clear winch_active_.
+    // Used by STOP. Note: PWM=0 coasts — no holding torque. If the spool
+    // tends to gravity-unroll under load, switch back to position mode
+    // here and write present-position to lock.
+    void stop_tank_winch(uint8_t idx);
 
     // Drive the tank's pump on PUMPING entry, off on any other step.
     void drive_pump_for_step(const Sampler& tank);

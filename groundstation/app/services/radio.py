@@ -298,7 +298,7 @@ class RadioService:
             t = cfg["tanks"][tid]
             parts.append(
                 f"{tid}={1 if t['enabled'] else 0}:{t['channel']}:{t['servo_id']}"
-                f":{t['servo_home']}:{t['servo_unrolled']}")
+                f":{t['winch_unroll_ms']}:{t['winch_roll_ms']}:{t['winch_pwm']}")
         return ",".join(parts)
 
     def _expected_cfg_ele_details(self, cfg: dict) -> str:

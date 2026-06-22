@@ -36,7 +36,7 @@ void Sampler::tick() {
 
     switch (step_) {
         case TankStep::DESCENDING:
-            if (elapsed >= mock_timing::DESCENDING_MS) enter_step(TankStep::IN_WATER);
+            if (elapsed >= descending_ms_) enter_step(TankStep::IN_WATER);
             break;
         case TankStep::IN_WATER:
             if (elapsed >= mock_timing::IN_WATER_MS) enter_step(TankStep::PUMPING);
@@ -59,7 +59,7 @@ void Sampler::tick() {
             }
             break;
         case TankStep::ASCENDING:
-            if (elapsed >= mock_timing::ASCENDING_MS) enter_step(TankStep::HOME);
+            if (elapsed >= ascending_ms_) enter_step(TankStep::HOME);
             break;
         case TankStep::HOME:
             if (elapsed >= mock_timing::HOME_MS) {

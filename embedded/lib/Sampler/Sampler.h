@@ -88,6 +88,14 @@ public:
     // the no-sensor path uses the fixed mock PUMPING_MS.
     void set_pumping_timeout_ms(uint32_t ms) { pumping_timeout_ms_ = ms; }
 
+    // Override the DESCENDING / ASCENDING step dwells. Provisioned from
+    // the per-tank winch configuration: the FSM must dwell at least as
+    // long as the winch takes to physically unspool / re-spool, or the
+    // step transitions while the line is still moving. Defaults to the
+    // mock-timing constants so unit tests keep working unchanged.
+    void set_descending_ms(uint32_t ms) { descending_ms_ = ms; }
+    void set_ascending_ms (uint32_t ms) { ascending_ms_  = ms; }
+
     // Force this tank to FAULT immediately. No-op if already FAULT.
     // Used by E-STOP. Step is cleared to NONE.
     void abort();
@@ -120,6 +128,8 @@ private:
     LevelSensorFn level_sensor_     = nullptr;
     void*         level_sensor_ctx_ = nullptr;
     uint32_t      pumping_timeout_ms_ = mock_timing::PUMPING_TIMEOUT_MS;
+    uint32_t      descending_ms_      = mock_timing::DESCENDING_MS;
+    uint32_t      ascending_ms_       = mock_timing::ASCENDING_MS;
 
     void enter_state(TankState s);
     void enter_step(TankStep s);
