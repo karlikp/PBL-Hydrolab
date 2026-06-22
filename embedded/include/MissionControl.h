@@ -161,8 +161,12 @@ public:
     // Optional: attach the Elmetron winch (H-bridge). With both a probe
     // and a winch attached, the Elmetron FSM switches to hardware mode:
     // transitions are driven by the limit switch / water detection /
-    // convergence rather than synthetic timers.
-    void set_winch(WinchH* w) { winch_ = w; update_elmetron_mode(); }
+    // convergence rather than synthetic timers. Also applies the
+    // current FSM-step's drive command immediately, so the H-bridge
+    // leaves "coast" right after attach (otherwise gravity unspools
+    // the cable on benches with weight added before any measurement
+    // has run).
+    void set_winch(WinchH* w);
 
 private:
     // Per-tank geo-tag captured at the moment the Sampler transitions

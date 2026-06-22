@@ -1184,8 +1184,25 @@ void MissionControl::apply_elmetron_config() {
 // the H-bridge holds the last command until the next step change, so we
 // only act on transitions. STOP on IN_WATER / HOME / NONE (NONE covers
 // abort + FAULT, so the motor always halts when the cycle ends).
+void MissionControl::set_winch(WinchH* w) {
+    winch_ = w;
+    update_elmetron_mode();
+    // Bring the H-bridge out of its boot "coast" state immediately —
+    // applies hold (or whichever drive matches the current FSM step,
+    // which is NONE at boot, so hold) so weight on the cable can't
+    // gravity-unspool before any measurement has been triggered.
+    if (winch_ && elmetron_) {
+        drive_elmetron_winch_for_step();
+    }
+}
+
 void MissionControl::drive_elmetron_winch_for_step() {
     if (!winch_ || !elmetron_) return;
+    // Safety: E_STOP overrides everything — motor coasts, no current.
+    if (mode_ == SystemMode::E_STOP) {
+        winch_->stop();
+        return;
+    }
     switch (elmetron_->step()) {
         case ElmetronStep::HOMING:
         case ElmetronStep::ASCENDING:
@@ -1196,9 +1213,23 @@ void MissionControl::drive_elmetron_winch_for_step() {
             break;
         case ElmetronStep::IN_WATER:
         case ElmetronStep::HOME:
-        case ElmetronStep::NONE:
-            winch_->stop();
+        case ElmetronStep::NONE: {
+            // Apply a small UP-direction PWM to hold the probe against
+            // gravity. Without this, stop() puts the H-bridge in coast
+            // (both halves tristate, motor floats) and the cable
+            // gravity-unspools while we're sitting in IN_WATER.
+            //   IN_WATER : probe must stay at depth for the duration
+            //              of the convergence/measure window.
+            //   HOME     : brief settle dwell — limit switch holds it
+            //              mechanically, but applying hold doesn't hurt.
+            //   NONE     : idle after a cycle (or after STOP_ELMETRON
+            //              mid-cycle). Probe could be at any depth.
+            // Tune up if the load still drifts, down if the motor
+            // actually rotates upward at this duty.
+            constexpr uint8_t HOLD_DUTY_PCT = 20;
+            winch_->drive(WinchH::Direction::UP, HOLD_DUTY_PCT);
             break;
+        }
     }
 }
 
