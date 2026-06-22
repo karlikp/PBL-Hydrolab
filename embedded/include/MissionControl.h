@@ -63,13 +63,13 @@ struct TankConfig {
     bool     enabled  = true;
     uint8_t  channel  = 1;        // 1..3 — the fixed PUMP+TOPCN pair
     uint8_t  servo_id = 1;        // SC-09 bus address of this tank's winch
-    uint16_t winch_unroll_ms = 4000;
-    uint16_t winch_roll_ms   = 6000;   // typically a bit longer (load)
-    int16_t  winch_pwm       = 600;
+    uint16_t winch_unroll_ms = 4500;
+    uint16_t winch_roll_ms   = 8500;   // typically a bit longer (load)
+    int16_t  winch_pwm       = 500;
 };
 
 struct SystemConfig {
-    uint32_t   pumping_timeout_ms = 90000;
+    uint32_t   pumping_timeout_ms = 75000;
     TankConfig tanks[3];
 };
 
@@ -77,16 +77,16 @@ struct SystemConfig {
 // module compile-time defaults, so an un-provisioned board is unchanged.
 // Timeouts are seconds on the wire; converted to ms when applied.
 struct ElmetronConfig {
-    float    water_threshold_ms     = 0.7f;  // descent trigger (cond mS/cm)
-    uint8_t  winch_down_duty_pct    = 50;    // DESCENDING speed (slower → conductivity trigger fires before overshoot)
+    float    water_threshold_ms     = 0.1f;  // descent trigger (cond mS/cm)
+    uint8_t  winch_down_duty_pct    = 60;    // DESCENDING speed (slower → conductivity trigger fires before overshoot)
     uint8_t  winch_up_duty_pct      = 80;    // ASCENDING / HOMING speed (faster → less wait at end of cycle)
-    uint16_t descent_timeout_s      = 4;     // safety cap (ceilinged in firmware)
-    uint16_t ascent_timeout_s       = 5;
-    uint16_t homing_timeout_s       = 4;
-    uint16_t measure_timeout_s      = 90;    // strict measurement cap
-    uint16_t convergence_window_s   = 10;
-    uint8_t  convergence_tol_pct    = 5;
-    bool     winch_dir_invert       = false; // flip DOWN/UP if wrong way
+    uint16_t descent_timeout_s      = 15;    // safety cap (ceilinged in firmware)
+    uint16_t ascent_timeout_s       = 15;
+    uint16_t homing_timeout_s       = 15;
+    uint16_t measure_timeout_s      = 45;    // strict measurement cap
+    uint16_t convergence_window_s   = 5;
+    uint8_t  convergence_tol_pct    = 10;
+    bool     winch_dir_invert       = true;  // flip DOWN/UP if wrong way
     bool     limit_active_low       = true;
 };
 

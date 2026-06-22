@@ -35,11 +35,11 @@ VALID_CHANNELS = (1, 2, 3)
 DEFAULTS = {
     "serial": {
         "port": "/dev/ttyUSB0",   # COMx on Windows; set in the settings page
-        "baud": 115200,           # 57600 for the RFD868 radio
+        "baud": 57600,            # RFD868 radio; CP210x dev uses 115200
     },
     "level_poll_interval_s": 1.5, # 0 disables the live wet/dry poller
     "global": {
-        "pumping_timeout_s": 90,  # hard cap on the PUMPING step
+        "pumping_timeout_s": 75,  # hard cap on the PUMPING step
     },
     # Winches drive in PWM/wheel mode (multi-revolution unspool). Both
     # directions are pure time-based; rewind is typically a bit longer
@@ -48,24 +48,26 @@ DEFAULTS = {
     #   winch_roll_ms   : drive duration when ASCENDING (rewind)
     #   winch_pwm       : signed duty -1023..1023; sign sets which
     #                     direction is "unroll" (flip without rewiring)
+    # Calibrated values from the bench setup as of 2026-06-22 — channel
+    # mapping reflects the as-wired pump+sensor pairs (C1↔ch2, C2↔ch1,
+    # C3↔ch3 stays disabled).
     "tanks": {
-        "C1": {"enabled": True,  "channel": 1, "servo_id": 1, "winch_unroll_ms": 4000, "winch_roll_ms": 6000, "winch_pwm":  600},
-        "C2": {"enabled": True,  "channel": 2, "servo_id": 3, "winch_unroll_ms": 4000, "winch_roll_ms": 6000, "winch_pwm": -600},
-        "C3": {"enabled": False, "channel": 3, "servo_id": 3, "winch_unroll_ms": 4000, "winch_roll_ms": 6000, "winch_pwm":  600},
+        "C1": {"enabled": True,  "channel": 2, "servo_id": 1, "winch_unroll_ms": 4500, "winch_roll_ms":  8500, "winch_pwm":  500},
+        "C2": {"enabled": True,  "channel": 1, "servo_id": 3, "winch_unroll_ms": 4500, "winch_roll_ms":  8500, "winch_pwm": -500},
+        "C3": {"enabled": False, "channel": 3, "servo_id": 2, "winch_unroll_ms": 4000, "winch_roll_ms": 12000, "winch_pwm":  600},
     },
-    # Elmetron tuning — provisioned via CMD,CFG_ELE. Defaults match the
-    # firmware module defaults. Timeouts in seconds.
+    # Elmetron tuning — provisioned via CMD,CFG_ELE. Bench-calibrated.
     "elmetron": {
-        "water_threshold_ms": 0.35,    # descent trigger (cond mS/cm)
-        "winch_down_duty_pct": 50,    # DESCENDING speed (slower = water-detect fires before overshoot)
+        "water_threshold_ms": 0.1,    # descent trigger (cond mS/cm)
+        "winch_down_duty_pct": 60,    # DESCENDING speed (slower = water-detect fires before overshoot)
         "winch_up_duty_pct":   80,    # ASCENDING / HOMING speed (faster = less wait at cycle end)
-        "descent_timeout_s": 5,       # safety cap (firmware ceiling 30)
-        "ascent_timeout_s": 5,
-        "homing_timeout_s": 5,
-        "measure_timeout_s": 60,      # strict measurement cap
-        "convergence_window_s": 10,
-        "convergence_tol_pct": 5,
-        "winch_dir_invert": False,    # flip if winch goes the wrong way
+        "descent_timeout_s": 15,      # safety cap (firmware ceiling 30)
+        "ascent_timeout_s": 15,
+        "homing_timeout_s": 15,
+        "measure_timeout_s": 45,      # strict measurement cap
+        "convergence_window_s": 5,
+        "convergence_tol_pct": 10,
+        "winch_dir_invert": True,     # flip if winch goes the wrong way
         "limit_active_low": True,
     },
 }
