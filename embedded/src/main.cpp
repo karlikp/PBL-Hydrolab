@@ -70,7 +70,10 @@ constexpr int ELE_TX_PIN = 18;
 constexpr int H_EN_L_PIN  = 6;
 constexpr int H_EN_R_PIN  = 7;
 constexpr int H_PWM_PIN   = 15;
-constexpr int H_LIMIT_PIN = 12;
+// Note: the board-pinout PDF says IO12, but the electrical schematic
+// (source of truth — the actual copper traces) shows H_LIMIT routed to
+// Pin 22 / IO13. IO12 was unwired; HW team confirmed the schematic.
+constexpr int H_LIMIT_PIN = 13;
 
 constexpr const char* FIRMWARE_VERSION = "0.1.0-skeleton";
 
