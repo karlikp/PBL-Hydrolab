@@ -182,6 +182,42 @@ bool ServoBus::set_id(uint8_t current_id, uint8_t new_id) {
     return true;
 }
 
+// Build and send a ping packet via the raw HardwareSerial. Captures
+// any bytes that come back over `wait_ms` ms. The SCServo lib is
+// bypassed entirely so we can see exactly what's on the wire.
+size_t ServoBus::raw_ping_capture(uint8_t id, uint8_t* out, size_t out_max,
+                                  uint32_t wait_ms) {
+    HardwareSerial* serial = impl_->sc.pSerial;
+    if (!serial) return 0;
+
+    // Drain any stale RX.
+    while (serial->read() != -1) {}
+
+    // Construct a ping packet: 0xFF 0xFF id 0x02 INST_PING(=1) ~cksum.
+    // Checksum = ~(id + 0x02 + 0x01).
+    uint8_t pkt[6];
+    pkt[0] = 0xFF;
+    pkt[1] = 0xFF;
+    pkt[2] = id;
+    pkt[3] = 0x02;
+    pkt[4] = 0x01;
+    pkt[5] = static_cast<uint8_t>(~(id + 0x02 + 0x01));
+    serial->write(pkt, 6);
+    serial->flush();  // wait for TX to physically complete
+
+    // Capture bytes for wait_ms. Includes both the echo (if any) AND
+    // the servo's reply (if any). No filtering — pure dump.
+    size_t got = 0;
+    const uint32_t t_start = millis();
+    while (millis() - t_start < wait_ms && got < out_max) {
+        const int c = serial->read();
+        if (c != -1) {
+            out[got++] = static_cast<uint8_t>(c);
+        }
+    }
+    return got;
+}
+
 bool ServoBus::broadcast_set_id(uint8_t new_id) {
     SCSCL& sc = impl_->sc;
     sc.unLockEprom(BROADCAST_ID);

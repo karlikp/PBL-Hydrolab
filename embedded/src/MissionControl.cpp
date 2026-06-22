@@ -238,6 +238,11 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
         const size_t args_len = static_cast<size_t>(end - args);
         cmd_servo_pos(verb, args, args_len);
     }
+    else if (matches("SERVO_RAW")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_servo_raw(verb, args, args_len);
+    }
     else if (matches("PUMP")) {
         const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
         const size_t args_len = static_cast<size_t>(end - args);
@@ -434,6 +439,42 @@ void MissionControl::cmd_servo_ping(const char* verb, const char* args, size_t a
     const int reply = servo_bus_->ping(static_cast<uint8_t>(id));
     char ev[64];
     snprintf(ev, sizeof(ev), "EVT,SYS,SERVO_PING,id=%d,reply=%d", id, reply);
+    send_payload(ev);
+    emit_ack(verb);
+}
+
+// CMD,SERVO_RAW,<id> — fire a Ping packet outside the SCServo lib and
+// dump every byte that comes back on RX over the next ~150 ms as hex.
+// Verifies what's actually on the bus when the lib's reads come back
+// broken.
+//   ff ff <id> 02 01 <cksum>                              ← request echo
+//   ff ff <id> 02 <err> <cksum>                           ← servo reply
+// Expected for a healthy bus: 12 bytes (6 echo + 6 reply).
+// Expected if servo doesn't reply:  6 bytes (echo only).
+// Expected if RX path is dead:      0 bytes.
+void MissionControl::cmd_servo_raw(const char* verb, const char* args, size_t args_len) {
+    if (!servo_bus_) { emit_nack(verb, "no_servo_bus"); return; }
+    char buf[16] = {0};
+    if (args_len == 0 || args_len >= sizeof(buf)) { emit_nack(verb, "bad_args"); return; }
+    memcpy(buf, args, args_len);
+    const int id = atoi(buf);
+    if (id < 1 || id > 253) { emit_nack(verb, "out_of_range"); return; }
+
+    uint8_t rx[16] = {0};
+    const size_t got = servo_bus_->raw_ping_capture(
+        static_cast<uint8_t>(id), rx, sizeof(rx), /*wait_ms=*/150);
+
+    // Hex-format the captured bytes (up to 16 → 47 chars including separators).
+    char hex[64] = {0};
+    size_t off = 0;
+    for (size_t i = 0; i < got && off + 4 < sizeof(hex); ++i) {
+        off += snprintf(hex + off, sizeof(hex) - off, "%s%02X",
+                        i == 0 ? "" : ":", rx[i]);
+    }
+
+    char ev[128];
+    snprintf(ev, sizeof(ev), "EVT,SYS,SERVO_RAW,id=%d,len=%u,bytes=%s",
+             id, static_cast<unsigned>(got), hex);
     send_payload(ev);
     emit_ack(verb);
 }

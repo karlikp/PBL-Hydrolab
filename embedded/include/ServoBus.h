@@ -18,6 +18,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>
 
 class HardwareSerial;
 
@@ -118,6 +119,21 @@ public:
     // but can selectively unplug enough of them to set up a state
     // where a targeted set_id() can then pick off a single survivor.
     bool broadcast_set_id(uint8_t new_id);
+
+    // Low-level diagnostic: send a Ping packet (6 bytes) for `id` and
+    // capture up to `out_max` bytes received over the next `wait_ms`
+    // milliseconds. Bypasses the SCServo library entirely. Returns
+    // the number of bytes captured (≤ out_max). Used to verify what's
+    // actually on the bus when the lib's high-level reads (ReadPos,
+    // Ping) come back broken.
+    //
+    // Expected wire pattern for a healthy bus:
+    //   echo of ping req (6 bytes) + servo reply (6 bytes) = 12 bytes
+    //   ff ff <id> 02 01 <cksum>  ff ff <id> 02 <err> <cksum>
+    // Just echo (6 bytes) → servo isn't replying.
+    // Zero bytes → bus is electrically dead from the ESP's POV.
+    size_t raw_ping_capture(uint8_t id, uint8_t* out, size_t out_max,
+                            uint32_t wait_ms);
 
 private:
     struct Impl;
