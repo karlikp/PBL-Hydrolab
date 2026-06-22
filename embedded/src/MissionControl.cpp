@@ -559,11 +559,12 @@ void MissionControl::cmd_reset_tank(uint8_t idx, const char* verb) {
     }
     emit_ack(verb);
 
-    // Return the tank's winch to home via cumulative-position-tracked
-    // rewind. The accumulator measures exactly how far we've unrolled
-    // (across multiple turns), so rewind stops when we're back — no
-    // dependence on time symmetry between unroll/rewind speeds.
-    start_winch_rewind(idx);
+    // RESET does NOT drive the winch. The autonomous rewind already
+    // ran at the end of ASCENDING; if the spool isn't quite at home,
+    // the operator uses the manual JOG buttons (15° per click, encoder-
+    // gated) to position it. RESET = just clear state, ready for the
+    // next sample. This avoids the over-wind that the cumulative-based
+    // rewind safety cap caused when ReadPos was unreliable.
 
     // If E-STOP latched and there are no fault tanks left, drop to IDLE.
     // The Elmetron is implicitly cleared at the same time — the
