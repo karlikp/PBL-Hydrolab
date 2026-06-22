@@ -1193,11 +1193,11 @@ void MissionControl::drive_elmetron_winch_for_step() {
         case ElmetronStep::IN_WATER:
         case ElmetronStep::HOME:
         case ElmetronStep::NONE:
-            // Coast — both H-bridge halves tristate. We tried brake
-            // mode (commit f0f532d) and counter-PWM (d47b8d0); neither
-            // held the load on this specific H-bridge module. Holding
-            // is blocked until we know what bridge IC is on board.
-            winch_->stop();
+            // Brake (IBT-2 / BTS7960 short-brake mode — see WinchH.cpp
+            // for pin polarity). Passively holds the probe against
+            // gravity via back-EMF dissipation through the motor's
+            // shorted low-side FETs. Zero standing current.
+            winch_->brake();
             break;
     }
 }

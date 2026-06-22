@@ -17,14 +17,20 @@ void WinchH::begin() {
 }
 
 void WinchH::brake() {
-    // Both enables HIGH = motor terminals tied together through the
-    // bridge. Back-EMF dissipates through the shorted coils whenever
-    // the shaft is forced to rotate, providing passive holding torque.
-    // PWM is set to 0 (some H-bridge ICs use PWM=0 + both ENs HIGH for
-    // "brake to ground"; others ignore PWM in this state — 0 is safe).
-    digitalWrite(en_l_, HIGH);
-    digitalWrite(en_r_, HIGH);
-    ledcWrite(PWM_CHANNEL, 0);
+    // IBT-2 (BTS7960 dual half-bridge) wiring as best-guess: H_PWM is
+    // the tied R_EN+L_EN (module-enable), and H_EN_L / H_EN_R are the
+    // direction-specific PWM signals (RPWM / LPWM). For BTS7960 brake
+    // mode the module must be ENABLED (ENs high) with BOTH direction
+    // PWMs LOW — this shorts the motor through both low-side FETs.
+    //   ENs (H_PWM)  = full duty (logical HIGH)
+    //   RPWM (en_l_) = 0
+    //   LPWM (en_r_) = 0
+    // First commit f0f532d had this inverted (ENs LOW + PWM full = coast)
+    // — corrected here per IBT-2 datasheet.
+    digitalWrite(en_l_, LOW);
+    digitalWrite(en_r_, LOW);
+    const uint32_t max_duty = (1u << PWM_RES_BITS) - 1;
+    ledcWrite(PWM_CHANNEL, max_duty);
 }
 
 void WinchH::drive(Direction dir, uint8_t duty_pct) {
