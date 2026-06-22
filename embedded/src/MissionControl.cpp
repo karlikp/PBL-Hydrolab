@@ -1099,44 +1099,23 @@ void MissionControl::cmd_jog(uint8_t idx, int8_t sign, const char* verb) {
     emit_ack(verb);
 }
 
-// Magnitude of the holding PWM applied after every motion ends.
-// Continuous low-duty drive in the rewind direction — enough to
-// counter gravity on a loaded spool, not enough to actually rotate.
-// Without position feedback (ReadPos is broken on this bus) this is
-// our substitute for closed-loop position hold. Tune up if the spool
-// still drifts under load, down if the motor moves under no load.
-static constexpr int16_t WINCH_HOLD_PWM_MAG = 100;  // ~10% duty
-
-// Apply the counter-PWM hold to tank idx's winch. Direction is
-// opposite of the configured unroll direction (sign-flipped winch_pwm),
-// so gravity-induced unspool gets actively resisted.
-void MissionControl::apply_winch_hold(uint8_t idx) {
-    if (!servo_bus_ || idx >= 3) return;
-    const TankConfig& tc = config_.tanks[idx];
-    const int16_t hold = (tc.winch_pwm > 0) ? -WINCH_HOLD_PWM_MAG : +WINCH_HOLD_PWM_MAG;
-    servo_bus_->write_pwm(tc.servo_id, hold);
-}
-
-// Per-tick: when a winch motion duration elapses, switch from the
-// active drive PWM to the holding PWM (instead of coasting to zero).
+// Per-tick: stop any winch whose configured duration has elapsed.
 void MissionControl::service_winches() {
     if (!servo_bus_) return;
     const uint32_t now = clock_.now_ms();
     for (uint8_t i = 0; i < 3; ++i) {
         if (!winch_active_[i]) continue;
         if ((int32_t)(now - winch_stop_at_ms_[i]) >= 0) {
-            apply_winch_hold(i);
+            servo_bus_->stop_pwm(config_.tanks[i].servo_id);
             winch_active_[i] = false;
         }
     }
 }
 
-// Halt this tank's winch immediately (transition straight from active
-// drive to the holding PWM). Used by STOP. The spool stays where it
-// was when STOP fired instead of free-falling under gravity.
+// Halt this tank's winch immediately (PWM=0 = coast). Used by STOP.
 void MissionControl::stop_tank_winch(uint8_t idx) {
     if (!servo_bus_ || idx >= 3) return;
-    apply_winch_hold(idx);
+    servo_bus_->stop_pwm(config_.tanks[idx].servo_id);
     winch_active_[idx] = false;
 }
 
@@ -1214,15 +1193,11 @@ void MissionControl::drive_elmetron_winch_for_step() {
         case ElmetronStep::IN_WATER:
         case ElmetronStep::HOME:
         case ElmetronStep::NONE:
-            // Brake mode: both H-bridge halves HIGH, motor terminals
-            // shorted. Passively resists any rotation via back-EMF
-            // dissipation — holds against gravity without active
-            // current draw, and (unlike counter-PWM) doesn't drift
-            // either way under no load.
-            //   IN_WATER : probe stays at depth for the measure window.
-            //   HOME     : brief settle dwell; brake doesn't hurt.
-            //   NONE     : idle after a cycle (or STOP_ELMETRON mid-cycle).
-            winch_->brake();
+            // Coast — both H-bridge halves tristate. We tried brake
+            // mode (commit f0f532d) and counter-PWM (d47b8d0); neither
+            // held the load on this specific H-bridge module. Holding
+            // is blocked until we know what bridge IC is on board.
+            winch_->stop();
             break;
     }
 }

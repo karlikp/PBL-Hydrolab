@@ -288,15 +288,9 @@ private:
     // the configured duration has elapsed. Called every tick().
     void service_winches();
 
-    // Halt the tank's winch immediately, switching it to the holding
-    // PWM (small counter-direction drive that fights gravity unspool).
-    // Used by STOP. Wheel-mode servos lose all torque at PWM=0, so we
-    // never write 0 — always either the active drive PWM or the hold.
+    // Halt the tank's winch immediately: PWM=0, clear winch_active_.
+    // Used by STOP. PWM=0 coasts — no holding torque.
     void stop_tank_winch(uint8_t idx);
-
-    // Apply the per-tank holding PWM. Called by service_winches when
-    // a motion duration elapses and by stop_tank_winch.
-    void apply_winch_hold(uint8_t idx);
 
     // Drive the tank's pump on PUMPING entry, off on any other step.
     void drive_pump_for_step(const Sampler& tank);
