@@ -73,9 +73,17 @@ void ElmetronProbe::parse_frame(char* s) {
             r.ph = atof(tok);
         } else if (strstr(tok, "O2")) {
             r.oxygen = atof(tok);
-        } else if (strstr(tok, "S/cm")) {
+        } else if (const char* s = strstr(tok, "S/cm")) {
+            // Explicit unit-prefix detection (replaces the legacy >10
+            // magnitude heuristic). The byte immediately before 'S' is
+            // 'm' for "mS/cm" (keep as-is) — anything else (a 'µ' byte,
+            // single 0xB5 or the trailing 0xBC of UTF-8 0xCE 0xBC, or
+            // no prefix at all) is treated as "µS/cm" and divided.
+            // Works for the full range, including very low cond where
+            // the magnitude heuristic broke.
             float v = atof(tok);
-            if (v > 10.0f) v /= 1000.0f;     // µS/cm → mS/cm
+            const bool already_mS = (s > tok) && (*(s - 1) == 'm');
+            if (!already_mS) v /= 1000.0f;
             r.conductivity = v;
         } else if (strchr(tok, 'C') && !strstr(tok, "CX")) {
             r.temperature = atof(tok);       // exclude the "CX" model tag
