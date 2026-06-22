@@ -34,8 +34,8 @@ public:
     // Confirmed empirically (2026-06-22):
     //   pin 44 = bus TX direction (writes here move the motor)
     //   pin 43 = bus RX direction (TX echo arrives here)
-    // Both directions verified by attempting the swap — motor stopped
-    // moving, confirming pin 44 is the only writable path to the bus.
+    //   pin 44 as RX = sees nothing (the chip can't read its own TX
+    //                  pin, and the board's RX path goes only to pin 43)
     static constexpr int TX_PIN = 44;
     static constexpr int RX_PIN = 43;
 
