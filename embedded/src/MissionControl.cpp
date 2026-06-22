@@ -243,6 +243,11 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
         const size_t args_len = static_cast<size_t>(end - args);
         cmd_servo_raw(verb, args, args_len);
     }
+    else if (matches("SERVO_REPLY_ON")) {
+        const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
+        const size_t args_len = static_cast<size_t>(end - args);
+        cmd_servo_reply_on(verb, args, args_len);
+    }
     else if (matches("PUMP")) {
         const char* args = (verb_end < end) ? verb_end + 1 : verb_end;
         const size_t args_len = static_cast<size_t>(end - args);
@@ -439,6 +444,26 @@ void MissionControl::cmd_servo_ping(const char* verb, const char* args, size_t a
     const int reply = servo_bus_->ping(static_cast<uint8_t>(id));
     char ev[64];
     snprintf(ev, sizeof(ev), "EVT,SYS,SERVO_PING,id=%d,reply=%d", id, reply);
+    send_payload(ev);
+    emit_ack(verb);
+}
+
+// CMD,SERVO_REPLY_ON,<id> — flip the Status Return Level register
+// (EEPROM reg 8) to 2 so the servo replies on all instructions. If the
+// servo shipped with this set to 0 (no replies — explains the silent
+// bus), this is a one-shot fix. EEPROM write, persists across power
+// cycles. Verify with CMD,SERVO_RAW afterwards: should now see 12 bytes
+// (echo + reply) instead of 6.
+void MissionControl::cmd_servo_reply_on(const char* verb, const char* args, size_t args_len) {
+    if (!servo_bus_) { emit_nack(verb, "no_servo_bus"); return; }
+    char buf[16] = {0};
+    if (args_len == 0 || args_len >= sizeof(buf)) { emit_nack(verb, "bad_args"); return; }
+    memcpy(buf, args, args_len);
+    const int id = atoi(buf);
+    if (id < 1 || id > 253) { emit_nack(verb, "out_of_range"); return; }
+    servo_bus_->set_status_return_level(static_cast<uint8_t>(id), 2);
+    char ev[64];
+    snprintf(ev, sizeof(ev), "EVT,SYS,SERVO_REPLY_ON,id=%d,level=2", id);
     send_payload(ev);
     emit_ack(verb);
 }

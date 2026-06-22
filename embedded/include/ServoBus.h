@@ -135,6 +135,15 @@ public:
     size_t raw_ping_capture(uint8_t id, uint8_t* out, size_t out_max,
                             uint32_t wait_ms);
 
+    // Write `level` to the Status Return Level register (EEPROM reg 8
+    // on Feetech SCS-family servos). Wrapped with unlock/lock and
+    // commit delays. Persists across power cycles.
+    //   0 = never reply (factory default on some units — explains the
+    //       silent bus syndrome we see)
+    //   1 = reply only to READ_DATA instructions
+    //   2 = reply on all instructions (what we want for diagnostics)
+    bool set_status_return_level(uint8_t id, uint8_t level);
+
 private:
     struct Impl;
     Impl* impl_;

@@ -218,6 +218,19 @@ size_t ServoBus::raw_ping_capture(uint8_t id, uint8_t* out, size_t out_max,
     return got;
 }
 
+bool ServoBus::set_status_return_level(uint8_t id, uint8_t level) {
+    // Register 8 is Status Return Level on Feetech SCS-family servos.
+    // EEPROM write, so unlock → write → lock with commit delays.
+    SCSCL& sc = impl_->sc;
+    sc.unLockEprom(id);
+    delay(EEPROM_COMMIT_MS);
+    sc.writeByte(id, /*reg=*/8, level);
+    delay(EEPROM_COMMIT_MS);
+    sc.LockEprom(id);
+    delay(EEPROM_COMMIT_MS);
+    return true;
+}
+
 bool ServoBus::broadcast_set_id(uint8_t new_id) {
     SCSCL& sc = impl_->sc;
     sc.unLockEprom(BROADCAST_ID);
