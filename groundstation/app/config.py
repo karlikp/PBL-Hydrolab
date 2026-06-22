@@ -41,20 +41,17 @@ DEFAULTS = {
     "global": {
         "pumping_timeout_s": 90,  # hard cap on the PUMPING step
     },
-    # EXPERIMENTAL — winches drive in PWM/wheel mode (multi-revolution
-    # unspool). Unroll is time-based; rewind uses ENCODER WRAP COUNTING
-    # to land exactly at home regardless of unroll/rewind speed asymmetry.
+    # Winches drive in PWM/wheel mode (multi-revolution unspool). Both
+    # directions are pure time-based; rewind is typically a bit longer
+    # than unroll because rolling fights load.
     #   winch_unroll_ms : drive duration when DESCENDING
-    #   winch_roll_ms   : SAFETY CAP on rewind (cumulative-tracked stop
-    #                     is the primary mechanism; this guards against
-    #                     ReadPos glitches). Should be > slowest plausible
-    #                     rewind duration.
+    #   winch_roll_ms   : drive duration when ASCENDING (rewind)
     #   winch_pwm       : signed duty -1023..1023; sign sets which
     #                     direction is "unroll" (flip without rewiring)
     "tanks": {
-        "C1": {"enabled": True,  "channel": 1, "servo_id": 1, "winch_unroll_ms": 4000, "winch_roll_ms": 12000, "winch_pwm":  600},
-        "C2": {"enabled": True,  "channel": 2, "servo_id": 3, "winch_unroll_ms": 4000, "winch_roll_ms": 12000, "winch_pwm": -600},
-        "C3": {"enabled": False, "channel": 3, "servo_id": 3, "winch_unroll_ms": 4000, "winch_roll_ms": 12000, "winch_pwm":  600},
+        "C1": {"enabled": True,  "channel": 1, "servo_id": 1, "winch_unroll_ms": 4000, "winch_roll_ms": 6000, "winch_pwm":  600},
+        "C2": {"enabled": True,  "channel": 2, "servo_id": 3, "winch_unroll_ms": 4000, "winch_roll_ms": 6000, "winch_pwm": -600},
+        "C3": {"enabled": False, "channel": 3, "servo_id": 3, "winch_unroll_ms": 4000, "winch_roll_ms": 6000, "winch_pwm":  600},
     },
     # Elmetron tuning — provisioned via CMD,CFG_ELE. Defaults match the
     # firmware module defaults. Timeouts in seconds.

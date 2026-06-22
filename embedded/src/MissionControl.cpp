@@ -891,10 +891,11 @@ void MissionControl::cmd_level(const char* verb, const char* args, size_t args_l
 }
 
 // Wire Sampler step transitions to the per-tank servo. DESCENDING
-// starts a time-bounded unroll; ASCENDING starts a cumulative-tracked
-// rewind that lands exactly at home regardless of unroll/rewind speed
-// asymmetry. IN_WATER/PUMPING/HOME are dwells — the winch finishes on
-// its own via service_winches.
+// starts an unroll PWM run; ASCENDING starts a rewind. Both are pure
+// time-based with separate durations (winch_unroll_ms / winch_roll_ms),
+// so unroll/rewind speed asymmetry is handled by the operator dialing
+// in different times per direction. IN_WATER/PUMPING/HOME are dwells —
+// the winch finishes on its own via service_winches.
 void MissionControl::drive_servo_for_step(const Sampler& tank) {
     const uint8_t idx = tank.id() - 1;
     switch (tank.step()) {
@@ -911,19 +912,9 @@ void MissionControl::drive_servo_for_step(const Sampler& tank) {
 void MissionControl::start_winch_unroll(uint8_t idx) {
     if (!servo_bus_ || idx >= 3) return;
     const TankConfig& tc = config_.tanks[idx];
-    // Re-anchor "home" at the current physical position. Assumes the
-    // operator has the spool at home (manually jogged or visually
-    // confirmed) before pressing START — same precondition as the
-    // position-mode firmware. Resets the cumulative so drift can't
-    // compound across cycles.
-    winch_cumulative_[idx]  = 0;
-    winch_last_raw_[idx]    = -1;          // first poll will seed
-    winch_last_poll_ms_[idx] = 0;
     servo_bus_->write_pwm(tc.servo_id, tc.winch_pwm);
-    winch_active_[idx]      = true;
-    winch_jog_[idx]         = false;
-    winch_direction_[idx]   = +1;
-    winch_safety_stop_[idx] = clock_.now_ms() + tc.winch_unroll_ms;
+    winch_active_[idx]     = true;
+    winch_stop_at_ms_[idx] = clock_.now_ms() + tc.winch_unroll_ms;
 }
 
 void MissionControl::start_winch_rewind(uint8_t idx) {
@@ -931,23 +922,15 @@ void MissionControl::start_winch_rewind(uint8_t idx) {
     const TankConfig& tc = config_.tanks[idx];
     // Drive in the OPPOSITE direction of unroll.
     servo_bus_->write_pwm(tc.servo_id, static_cast<int16_t>(-tc.winch_pwm));
-    winch_active_[idx]          = true;
-    winch_jog_[idx]             = false;
-    winch_direction_[idx]       = -1;
-    winch_safety_stop_[idx]     = clock_.now_ms() + tc.winch_roll_ms;
-    winch_rewind_start_cum_[idx] = winch_cumulative_[idx];  // snapshot for delta
-    winch_last_raw_[idx]        = -1;          // first poll will seed
-    winch_last_poll_ms_[idx]    = 0;
+    winch_active_[idx]     = true;
+    winch_stop_at_ms_[idx] = clock_.now_ms() + tc.winch_roll_ms;
 }
 
 // CMD,JOG_C{n}_{UP,DOWN} — manual one-shot jog used to position the
-// spool by hand (e.g. homing it before sampling). Stops after the
-// encoder cumulative has changed by JOG_DELTA_COUNTS in either
-// direction (~15° of shaft rotation at the SC-09's 1023≈300° range),
-// regardless of motor speed or load. Time cap is a safety backstop
-// only — fires if ReadPos fails and the cumulative can't update.
+// spool by hand (e.g. homing it before sampling). Drives PWM for a
+// fixed short duration; operator clicks again for more travel.
 //
-// sign convention matches start_winch: +1 = unroll direction (DOWN),
+// sign convention matches start_winch_*: +1 = unroll direction (DOWN),
 // -1 = rewind direction (UP). "UP/DOWN" labels follow the marine-winch
 // convention (line drops on unroll, rises on rewind).
 void MissionControl::cmd_jog(uint8_t idx, int8_t sign, const char* verb) {
@@ -956,114 +939,33 @@ void MissionControl::cmd_jog(uint8_t idx, int8_t sign, const char* verb) {
     if (idx >= 3 || !config_.tanks[idx].enabled){ emit_nack(verb, "tank_disabled"); return; }
     if (winch_active_[idx])                     { emit_nack(verb, "winch_busy");    return; }
 
-    constexpr uint32_t JOG_SAFETY_MS = 2000;     // backstop if encoder stops updating
+    constexpr uint32_t JOG_MS = 300;       // one click ≈ half a rev at default pwm
     const TankConfig& tc = config_.tanks[idx];
     const int16_t pwm = static_cast<int16_t>(sign) * tc.winch_pwm;
-    winch_jog_start_cum_[idx] = winch_cumulative_[idx];   // snapshot for delta
     servo_bus_->write_pwm(tc.servo_id, pwm);
-    winch_active_[idx]       = true;
-    winch_jog_[idx]          = true;
-    winch_direction_[idx]    = sign;
-    winch_safety_stop_[idx]  = clock_.now_ms() + JOG_SAFETY_MS;
-    winch_last_raw_[idx]     = -1;
-    winch_last_poll_ms_[idx] = 0;
+    winch_active_[idx]     = true;
+    winch_stop_at_ms_[idx] = clock_.now_ms() + JOG_MS;
     emit_ack(verb);
 }
 
-// Re-read present-position and accumulate the signed delta into
-// winch_cumulative_, handling 0..1023 wrap-around. A reading outside
-// the valid range (the bus has half-duplex echo glitches — see the
-// ServoBus header) is rejected so a single bad sample can't poison the
-// accumulator.
-void MissionControl::poll_winch_position(uint8_t idx) {
-    if (!servo_bus_ || idx >= 3) return;
-    const int raw = servo_bus_->read_position(config_.tanks[idx].servo_id);
-    if (raw < 0 || raw > 1023) return;     // glitch — skip this poll
-
-    const int16_t prev = winch_last_raw_[idx];
-    if (prev < 0) {
-        // First successful poll this run — seed without accumulating.
-        winch_last_raw_[idx] = static_cast<int16_t>(raw);
-        return;
-    }
-    int32_t delta = static_cast<int32_t>(raw) - prev;
-    // Wrap correction: |delta| > half-range means we crossed 0/1023.
-    if (delta >  512) delta -= 1024;
-    if (delta < -512) delta += 1024;
-    winch_cumulative_[idx] += delta;
-    winch_last_raw_[idx]    = static_cast<int16_t>(raw);
-}
-
-// Per-tick:
-//   1. Poll position at 20 Hz on any active winch (updates cumulative).
-//   2. Apply per-direction stop conditions:
-//        UNROLL  → time-based (winch_unroll_ms safety_stop).
-//        REWIND  → cumulative back to ~0 OR safety_stop fired.
+// Per-tick: stop any winch whose configured duration has elapsed.
 void MissionControl::service_winches() {
     if (!servo_bus_) return;
-    constexpr uint32_t POLL_INTERVAL_MS = 50;        // 20 Hz
-    constexpr int32_t  HOME_TOLERANCE   = 50;        // ~17° of slop
-
     const uint32_t now = clock_.now_ms();
     for (uint8_t i = 0; i < 3; ++i) {
         if (!winch_active_[i]) continue;
-
-        if (now - winch_last_poll_ms_[i] >= POLL_INTERVAL_MS) {
-            poll_winch_position(i);
-            winch_last_poll_ms_[i] = now;
-        }
-
-        bool should_stop = false;
-        const bool safety_hit = (int32_t)(now - winch_safety_stop_[i]) >= 0;
-        if (winch_jog_[i]) {
-            // Manual jog: stop after the shaft has rotated ~15° from
-            // the snapshot we took at jog start, regardless of speed/
-            // load. Safety_hit is the backstop if encoder fails.
-            constexpr int32_t JOG_DELTA_COUNTS = 51;  // ~15° at 1023≈300°
-            const int32_t delta = winch_cumulative_[i] - winch_jog_start_cum_[i];
-            const int32_t mag   = delta < 0 ? -delta : delta;
-            if (mag >= JOG_DELTA_COUNTS) should_stop = true;
-            else if (safety_hit)         should_stop = true;
-        } else if (winch_direction_[i] > 0) {
-            // Unroll: time-based stop.
-            if (safety_hit) should_stop = true;
-        } else {
-            // Rewind: stop on cumulative-back-to-home or safety cap.
-            //
-            // We REQUIRE real encoder motion this rewind before trusting
-            // the "back at home" check. Without this, if ReadPos failed
-            // during DESCENDING (cumulative stayed at 0), then at
-            // rewind start cumulative = 0 = "already home" and we'd
-            // stop the motor immediately. The fallback when the encoder
-            // isn't updating is the winch_roll_ms safety cap — slow
-            // but at least the line actually rewinds.
-            const int32_t cum     = winch_cumulative_[i];
-            const int32_t mag     = cum < 0 ? -cum : cum;
-            const int32_t d       = cum - winch_rewind_start_cum_[i];
-            const int32_t d_mag   = d < 0 ? -d : d;
-            const bool real_motion = d_mag >= 2 * HOME_TOLERANCE;
-            if (real_motion && mag <= HOME_TOLERANCE) should_stop = true;
-            else if (safety_hit)                       should_stop = true;
-        }
-
-        if (should_stop) {
+        if ((int32_t)(now - winch_stop_at_ms_[i]) >= 0) {
             servo_bus_->stop_pwm(config_.tanks[i].servo_id);
-            winch_active_[i]    = false;
-            winch_jog_[i]       = false;
-            winch_direction_[i] = 0;
+            winch_active_[i] = false;
         }
     }
 }
 
 // Halt this tank's winch immediately (PWM=0 = coast). Used by STOP.
-// Cumulative accumulator preserved — a subsequent RESET still rewinds
-// to home from wherever we coasted to.
 void MissionControl::stop_tank_winch(uint8_t idx) {
     if (!servo_bus_ || idx >= 3) return;
     servo_bus_->stop_pwm(config_.tanks[idx].servo_id);
-    winch_active_[idx]    = false;
-    winch_jog_[idx]       = false;
-    winch_direction_[idx] = 0;
+    winch_active_[idx] = false;
 }
 
 // Drive the pump for `tank` based on its current step. Pump on
