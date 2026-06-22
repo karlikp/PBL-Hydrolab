@@ -217,10 +217,11 @@ private:
     //                         (-1 = no successful poll yet this run)
     //   winch_last_poll_ms_ : rate-limits the ReadPos polls
     bool     winch_active_[3]          = {false, false, false};
-    bool     winch_jog_[3]             = {false, false, false};  // manual jog → pure time-based stop
+    bool     winch_jog_[3]             = {false, false, false};  // manual jog → angle-based stop
     int8_t   winch_direction_[3]       = {0, 0, 0};
     uint32_t winch_safety_stop_[3]     = {0, 0, 0};
     int32_t  winch_cumulative_[3]      = {0, 0, 0};
+    int32_t  winch_jog_start_cum_[3]   = {0, 0, 0};  // cumulative snapshot at jog start
     int16_t  winch_last_raw_[3]        = {-1, -1, -1};
     uint32_t winch_last_poll_ms_[3]    = {0, 0, 0};
 

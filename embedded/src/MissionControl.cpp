@@ -939,10 +939,11 @@ void MissionControl::start_winch_rewind(uint8_t idx) {
 }
 
 // CMD,JOG_C{n}_{UP,DOWN} — manual one-shot jog used to position the
-// spool by hand (e.g. homing it before sampling). Drives PWM for a
-// fixed short duration regardless of direction. The cumulative counter
-// updates during the jog, but start_winch_unroll zeroes it again, so
-// jog motion does NOT need to be exactly undone.
+// spool by hand (e.g. homing it before sampling). Stops after the
+// encoder cumulative has changed by JOG_DELTA_COUNTS in either
+// direction (~15° of shaft rotation at the SC-09's 1023≈300° range),
+// regardless of motor speed or load. Time cap is a safety backstop
+// only — fires if ReadPos fails and the cumulative can't update.
 //
 // sign convention matches start_winch: +1 = unroll direction (DOWN),
 // -1 = rewind direction (UP). "UP/DOWN" labels follow the marine-winch
@@ -953,14 +954,15 @@ void MissionControl::cmd_jog(uint8_t idx, int8_t sign, const char* verb) {
     if (idx >= 3 || !config_.tanks[idx].enabled){ emit_nack(verb, "tank_disabled"); return; }
     if (winch_active_[idx])                     { emit_nack(verb, "winch_busy");    return; }
 
-    constexpr uint32_t JOG_MS = 300;       // one click ≈ half a rev at default pwm
+    constexpr uint32_t JOG_SAFETY_MS = 2000;     // backstop if encoder stops updating
     const TankConfig& tc = config_.tanks[idx];
     const int16_t pwm = static_cast<int16_t>(sign) * tc.winch_pwm;
+    winch_jog_start_cum_[idx] = winch_cumulative_[idx];   // snapshot for delta
     servo_bus_->write_pwm(tc.servo_id, pwm);
     winch_active_[idx]       = true;
     winch_jog_[idx]          = true;
     winch_direction_[idx]    = sign;
-    winch_safety_stop_[idx]  = clock_.now_ms() + JOG_MS;
+    winch_safety_stop_[idx]  = clock_.now_ms() + JOG_SAFETY_MS;
     winch_last_raw_[idx]     = -1;
     winch_last_poll_ms_[idx] = 0;
     emit_ack(verb);
@@ -1011,10 +1013,17 @@ void MissionControl::service_winches() {
 
         bool should_stop = false;
         const bool safety_hit = (int32_t)(now - winch_safety_stop_[i]) >= 0;
-        if (winch_jog_[i] || winch_direction_[i] > 0) {
-            // Unroll or manual jog: pure time-based stop. (Jog's
-            // cumulative would start at the previous cycle's end, not
-            // 0, so we can't use the back-to-zero condition.)
+        if (winch_jog_[i]) {
+            // Manual jog: stop after the shaft has rotated ~15° from
+            // the snapshot we took at jog start, regardless of speed/
+            // load. Safety_hit is the backstop if encoder fails.
+            constexpr int32_t JOG_DELTA_COUNTS = 51;  // ~15° at 1023≈300°
+            const int32_t delta = winch_cumulative_[i] - winch_jog_start_cum_[i];
+            const int32_t mag   = delta < 0 ? -delta : delta;
+            if (mag >= JOG_DELTA_COUNTS) should_stop = true;
+            else if (safety_hit)         should_stop = true;
+        } else if (winch_direction_[i] > 0) {
+            // Unroll: time-based stop.
             if (safety_hit) should_stop = true;
         } else {
             // Rewind: stop on cumulative-back-to-home or safety cap.
