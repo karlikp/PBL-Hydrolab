@@ -56,20 +56,26 @@ protected:
         // Wait for TX to physically reach the wire (base wFlushSCS is
         // empty; we use the underlying Stream's flush).
         if (pSerial) pSerial->flush();
-        if (!pSerial || echo_pending_ <= 0) {
+        if (!pSerial || echo_pending_ < 2) {
             echo_pending_ = 0;
             return;
         }
-        // Drain exactly echo_pending_ bytes from RX. At 1 Mbps each
-        // byte is 10 µs in flight; budget 5 ms hard cap so a missing
-        // echo (cable yanked mid-send, ...) doesn't hang the loop.
+        // Drain JUST the first 2 echo bytes (the leading 0xFF 0xFF of
+        // our own request). The lib's checkHead() scans for 0xFF 0xFF
+        // within a 10-byte window — once our header is out of the way,
+        // the remaining echo bytes (6 for a Ping, 6–7 for Read/Write)
+        // are not 0xFF 0xFF so they get skipped, and checkHead lands on
+        // the real reply's 0xFF 0xFF. This works even if the servo has
+        // zero return delay (no race with my drain).
+        //
+        // Hard cap (2 ms) so a missing echo can't hang the loop.
         int drained = 0;
         const unsigned long t_start = micros();
-        while (drained < echo_pending_) {
+        while (drained < 2) {
             const int c = pSerial->read();
             if (c != -1) {
                 drained++;
-            } else if (micros() - t_start > 5000) {
+            } else if (micros() - t_start > 2000) {
                 break;
             }
         }
