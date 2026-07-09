@@ -200,12 +200,14 @@ void MissionControl::handle_command(const char* payload, size_t payload_len) {
     else if (matches("STOP_C2"))        cmd_stop_tank(1, verb);
     else if (matches("STOP_C3"))        cmd_stop_tank(2, verb);
     else if (matches("STOP_ELMETRON"))  cmd_stop_elmetron(verb);
-    else if (matches("JOG_C1_UP"))      cmd_jog(0, -1, verb);
-    else if (matches("JOG_C1_DOWN"))    cmd_jog(0, +1, verb);
-    else if (matches("JOG_C2_UP"))      cmd_jog(1, -1, verb);
-    else if (matches("JOG_C2_DOWN"))    cmd_jog(1, +1, verb);
-    else if (matches("JOG_C3_UP"))      cmd_jog(2, -1, verb);
-    else if (matches("JOG_C3_DOWN"))    cmd_jog(2, +1, verb);
+    else if (matches("JOG_C1_UP"))         cmd_jog(0, -1, verb);
+    else if (matches("JOG_C1_DOWN"))       cmd_jog(0, +1, verb);
+    else if (matches("JOG_C2_UP"))         cmd_jog(1, -1, verb);
+    else if (matches("JOG_C2_DOWN"))       cmd_jog(1, +1, verb);
+    else if (matches("JOG_C3_UP"))         cmd_jog(2, -1, verb);
+    else if (matches("JOG_C3_DOWN"))       cmd_jog(2, +1, verb);
+    else if (matches("JOG_ELMETRON_UP"))   cmd_jog_elmetron(-1, verb);
+    else if (matches("JOG_ELMETRON_DOWN")) cmd_jog_elmetron(+1, verb);
     else if (matches("RESET_C1"))       cmd_reset_tank(0, verb);
     else if (matches("RESET_C2"))       cmd_reset_tank(1, verb);
     else if (matches("RESET_C3"))       cmd_reset_tank(2, verb);
@@ -1099,16 +1101,54 @@ void MissionControl::cmd_jog(uint8_t idx, int8_t sign, const char* verb) {
     emit_ack(verb);
 }
 
+// CMD,JOG_ELMETRON_{UP,DOWN} — manual one-shot jog of the Elmetron
+// H-bridge winch. Mirrors the per-tank JOG_C<n>_{UP,DOWN} feature:
+// drives the motor at the configured duty for 300 ms, then brakes.
+// Refused while a measurement is in progress; allowed when the FSM
+// is DOCKED or FAULT (i.e. operator wants to manually reposition the
+// probe before / after a cycle).
+//
+// sign convention: +1 = DOWN (unroll), -1 = UP (rewind), matching the
+// tank-winch jog labels and the marine-winch UI convention.
+void MissionControl::cmd_jog_elmetron(int8_t sign, const char* verb) {
+    if (is_busy())              { emit_nack(verb, "busy");        return; }
+    if (!winch_)                { emit_nack(verb, "no_winch");    return; }
+    if (ele_jog_active_)        { emit_nack(verb, "winch_busy");  return; }
+
+    constexpr uint32_t JOG_MS = 300;
+    const WinchH::Direction dir =
+        (sign > 0) ? WinchH::Direction::DOWN : WinchH::Direction::UP;
+    const uint8_t duty = (sign > 0)
+        ? ele_config_.winch_down_duty_pct
+        : ele_config_.winch_up_duty_pct;
+    winch_->drive(dir, duty);
+    ele_jog_active_     = true;
+    ele_jog_stop_at_ms_ = clock_.now_ms() + JOG_MS;
+    emit_ack(verb);
+}
+
 // Per-tick: stop any winch whose configured duration has elapsed.
+// Handles BOTH tank servo jogs and the Elmetron H-bridge jog.
 void MissionControl::service_winches() {
-    if (!servo_bus_) return;
     const uint32_t now = clock_.now_ms();
-    for (uint8_t i = 0; i < 3; ++i) {
-        if (!winch_active_[i]) continue;
-        if ((int32_t)(now - winch_stop_at_ms_[i]) >= 0) {
-            servo_bus_->stop_pwm(config_.tanks[i].servo_id);
-            winch_active_[i] = false;
+
+    // Tank servo jogs (SC-09 PWM-mode).
+    if (servo_bus_) {
+        for (uint8_t i = 0; i < 3; ++i) {
+            if (!winch_active_[i]) continue;
+            if ((int32_t)(now - winch_stop_at_ms_[i]) >= 0) {
+                servo_bus_->stop_pwm(config_.tanks[i].servo_id);
+                winch_active_[i] = false;
+            }
         }
+    }
+
+    // Elmetron H-bridge jog. Once the deadline is reached, return the
+    // winch to brake mode so the probe holds at the new position.
+    if (winch_ && ele_jog_active_ &&
+        (int32_t)(now - ele_jog_stop_at_ms_) >= 0) {
+        winch_->brake();
+        ele_jog_active_ = false;
     }
 }
 

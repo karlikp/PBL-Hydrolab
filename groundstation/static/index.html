@@ -267,6 +267,10 @@
                     <button class="btn-start" onclick="sendCmd('START_ELMETRON')">Start</button>
                     <button class="btn-stop"  onclick="sendCmd('STOP_ELMETRON')"  disabled>Stop</button>
                     <button class="btn-reset" onclick="sendCmd('RESET_ELMETRON')" disabled>Reset</button>
+                    <div class="card-jog">
+                        <button onclick="sendCmd('JOG_ELMETRON_UP')"   title="Manual jog UP (300ms, podnosi sondę)">↑</button>
+                        <button onclick="sendCmd('JOG_ELMETRON_DOWN')" title="Manual jog DOWN (300ms, opuszcza sondę)">↓</button>
+                    </div>
                 </div>
                 <div class="card-readings invalid">
                     cond: --  &nbsp; temp: --<br>

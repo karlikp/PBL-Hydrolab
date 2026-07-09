@@ -244,6 +244,7 @@ CMD,START_C1,*04AB1234
 | `RESET_C3`         | (same for tank 3)                                             |
 | `RESET_ELMETRON`   | Clear Elmetron's `FAULT` and move it back to `DOCKED`         |
 | `JOG_C<n>_UP`<br>`JOG_C<n>_DOWN` | Manual one-shot winch jog on tank n (1–3). Drives PWM in the rewind (UP) or unroll (DOWN) direction for 300 ms, then coasts. Used to home the spool by hand before pressing `START_C<n>`. NACKs `busy` while any sampling is in progress, `winch_busy` while a previous jog is still finishing. |
+| `JOG_ELMETRON_UP`<br>`JOG_ELMETRON_DOWN` | Manual one-shot Elmetron H-bridge winch jog. Drives the motor up (rewind/retract) or down (deploy) at the configured Elmetron duty for 300 ms, then engages the BTS7960 brake. Used to manually position the probe before / after a measurement cycle. NACKs `busy` while a measurement is in progress, `winch_busy` while a previous jog is still finishing. |
 | `SERVO_POS,<id>`   | Empirical position readback. Returns `EVT,SYS,SERVO_POS,id=<id>,pos=<0..1023 or -1>`. Useful for verifying whether `ReadPos` works in PWM/wheel mode — sample before and after a JOG; values should change with motion if position-based control is viable. |
 | `STATUS`           | Ask the drone for a snapshot — it replies with one `EVT,STATE` per subsystem plus `EVT,SYS,CFG` |
 | `PING`             | Check the link is alive — drone responds `EVT,SYS,ACK,PING`   |

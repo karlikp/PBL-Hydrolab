@@ -212,6 +212,12 @@ private:
     bool     winch_active_[3]     = {false, false, false};
     uint32_t winch_stop_at_ms_[3] = {0, 0, 0};
 
+    // Elmetron winch jog (manual UP/DOWN button from the GCS). Active
+    // while a timed pulse is running; service_elmetron_winch_jog brakes
+    // the motor when the deadline is reached.
+    bool     ele_jog_active_      = false;
+    uint32_t ele_jog_stop_at_ms_  = 0;
+
     // Command handlers
     void cmd_start_tank(uint8_t idx, const char* verb);
     void cmd_start_elmetron(const char* verb);
@@ -225,6 +231,7 @@ private:
     void cmd_adc_scan(const char* verb);
     void cmd_servo_move(const char* verb, const char* args, size_t args_len);
     void cmd_jog(uint8_t idx, int8_t sign, const char* verb);
+    void cmd_jog_elmetron(int8_t sign, const char* verb);
     void cmd_servo_set_id(const char* verb, const char* args, size_t args_len);
     void cmd_servo_bcast_set_id(const char* verb, const char* args, size_t args_len);
     void cmd_servo_ping(const char* verb, const char* args, size_t args_len);
